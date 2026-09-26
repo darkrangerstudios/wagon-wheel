@@ -331,3 +331,31 @@ test('modes: auto from the menu; bypass needs the setting and a warning each tim
     assert.strictEqual(p.mode, 'ask', 'a mode never outlives the level it needs');
   } finally { s.dispose(); delete stubs.vscode.window.showWarningMessage; allowBypass = undefined; }
 });
+
+test('Codex review of 1ffa549: commands outside the folder are refused; a copy room only lets agents in the copy edit; Ask me revokes the task allowance', async () => {
+  const dir = fs.realpathSync(os.tmpdir()), copyDir = fs.mkdtempSync(path.join(dir, 'ww-copy-')), other = fs.mkdtempSync(path.join(dir, 'ww-other-'));
+  const meta = { ...newMeta('fixes'), copy: { repo: dir, dir: copyDir, branch: 'wagon-wheel/x', base: 'abc' }, seats: [
+    { id: 'claude', label: 'Claude', provider: 'claude', cwd: copyDir, access: 'edit' }, { id: 'codex', label: 'Codex', provider: 'codex', cwd: other }] };
+  stubs.vscode.window.showWarningMessage = async (m, o, ...choices) => choices[0];
+  const s = new RoomSession(context(), meta, null);
+  try {
+    await s.boot({});
+    // P1-3: the reader outside the copy can't be made the editor.
+    await s.runCommand('/claude access read');
+    await s.runCommand('/codex access run');
+    assert.strictEqual(s.slots.codex.seat.access, 'read');
+    assert.match(s.room.state.transcript.at(-1).text, /edits happen in the separate copy, and Codex works in .*outside it/);
+    // P1-2: a command whose directory is outside the agent's folder is refused before any card.
+    s.room.postFromHuman('@codex go'); await new Promise((res) => setImmediate(res));
+    s.slots.codex.seat.access = 'run'; s.room.busy.codex = true;
+    const r = await s.slots.codex.client.o.onApproval({ kind: 'command', command: 'rm -rf build', cwd: '/', reason: '' });
+    assert.deepStrictEqual(r, { allow: false, why: 'it would run outside its folder' });
+    // P2-4: Ask me (already selected) still revokes "Allow edits for this task".
+    s.slots.codex.seat.access = 'edit'; s.room.state.allowRules = [{ seat: 'codex', scope: s.room._approvalScope() }];
+    await s.runCommand('/codex mode ask');
+    assert.deepStrictEqual(s.room.state.allowRules, []);
+    assert.match(s.room.state.transcript.at(-1).text, /no longer allowed ahead of time/);
+    s.room.requestApproval('codex', { kind: 'edit', title: 'Edit x', paths: [path.join(other, 'x')] });
+    assert.strictEqual(s.room.state.transcript.at(-1).approval.status, 'pending');
+  } finally { s.dispose(); delete stubs.vscode.window.showWarningMessage; }
+});

@@ -252,3 +252,29 @@ test('modes answer for the human after the host\'s refusals: auto takes ordinary
     assert.deepStrictEqual(await r.requestApproval('codex', { ...edit(), refused: why }), { allow: false, why }, `bypass never overrides: ${why}`);
   }
 });
+
+// ---------- Codex review of 1ffa549 ----------
+test('a long command is never approved unseen: the card says it was cut and the full text waits with it', async () => {
+  const r = room(); r.postFromHuman('@claude @codex go');
+  const cmd = `printf SAFE #${'.'.repeat(4100)}\nprintf HIDDEN_OPERATION`;
+  r.requestApproval('claude', { kind: 'command', title: 'Run: printf SAFE', command: cmd });
+  const card = r.state.transcript.at(-1).approval;
+  assert.deepStrictEqual([card.command.length, card.commandCut], [4000, cmd.length]);
+  assert.strictEqual(r.pendingApprovals.get(card.id).full, cmd, 'the whole command can be read before answering');
+});
+
+test('a Codex command card shows where it runs, and that folder is checked like a path', () => {
+  const a = codexCard({ kind: 'command', command: 'rm -rf build', cwd: '/other-project' }, (x) => x);
+  const b = codexCard({ kind: 'command', command: 'rm -rf build', cwd: '/workspace' }, (x) => x);
+  assert.notDeepStrictEqual(a, b);
+  assert.deepStrictEqual([a.cwd, a.paths], ['/other-project', ['/other-project']]);
+});
+
+test('Claude cards say "every match" and name notebook deletes and inserts', () => {
+  const rel = (p) => p;
+  assert.match(claudeCard({ tool: 'Edit', input: { file_path: 'a.js', old_string: 'x', new_string: 'y', replace_all: true } }, rel).title, /every match/);
+  assert.notStrictEqual(claudeCard({ tool: 'Edit', input: { file_path: 'a.js', old_string: 'x', new_string: 'y', replace_all: true } }, rel).title, claudeCard({ tool: 'Edit', input: { file_path: 'a.js', old_string: 'x', new_string: 'y' } }, rel).title);
+  const del = claudeCard({ tool: 'NotebookEdit', input: { notebook_path: 'n.ipynb', cell_id: 'critical', edit_mode: 'delete', new_source: '' } }, rel);
+  assert.strictEqual(del.title, 'Delete cell critical in notebook n.ipynb'); assert.match(del.detail, /Deletes cell critical/);
+  assert.match(claudeCard({ tool: 'NotebookEdit', input: { notebook_path: 'n.ipynb', cell_id: 'c1', edit_mode: 'insert', new_source: 'x' } }, rel).title, /^Insert a new cell after cell c1/);
+});

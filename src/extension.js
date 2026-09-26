@@ -256,9 +256,10 @@ class RoomSession {
     const gone = () => this.disposed || !this.room || r.client !== client;
     if (gone()) return { allow: false, why: 'the room is closed' };
     const root = r.seat.cwd;
+    if (req.kind === 'command' && !req.cwd) req = { ...req, cwd: root }; // Claude runs commands in its own folder
     let verdict = { refused: null, sensitive: null };
     if (req.kind === 'edit') verdict = editPolicy.check(req.paths || [], root, await editPolicy.gitDirs(root));
-    else if ((req.paths || []).some((x) => !editPolicy.within(editPolicy.abs(root, x), root))) verdict.refused = 'outside its folder';
+    else if ((req.paths || []).some((x) => !editPolicy.within(editPolicy.abs(root, x), root))) verdict.refused = 'it would run outside its folder';
     if (gone()) return { allow: false, why: 'the room is closed' };
     return this.room.requestApproval(r.seat.id, { ...req, refused: req.refused || verdict.refused, sensitive: verdict.sensitive });
   }
@@ -515,7 +516,7 @@ class RoomSession {
       else if (m.type === 'approvalFull' && this.room && typeof m.id === 'string') {
         const p = this.room.pendingApprovals.get(m.id);
         // A read-only view (the room's own document scheme), so closing VS Code never asks to save it.
-        if (p && p.full) { const key = `/change-${m.id}-${Date.now()}.diff`; proposed.set(key, p.full); vscode.workspace.openTextDocument(vscode.Uri.parse(`wagon-wheel-proposed:${key}`)).then((d) => vscode.window.showTextDocument(d, { preview: true }), (e) => log(`full change: ${e.message}`)); }
+        if (p && p.full) { const key = `/change-${m.id}-${Date.now()}.${p.kind === 'command' ? 'sh' : 'diff'}`; proposed.set(key, p.full); vscode.workspace.openTextDocument(vscode.Uri.parse(`wagon-wheel-proposed:${key}`)).then((d) => vscode.window.showTextDocument(d, { preview: true }), (e) => log(`full change: ${e.message}`)); }
       }
       else if (m.type === 'copy' && this.room && this.meta.copy && ['open', 'bringIn', 'remove', 'refresh'].includes(m.action)) this.copyAction(m.action).catch((e) => this.room && this.room.note(`Separate copy: ${e.message}`));
       else if (m.type === 'moveOut' && this.room && this.slots[m.vendor]) this.moveOut(m.vendor).catch((e) => this.room && this.room.note(`Couldn't move the conversation out: ${e.message}`));
@@ -652,6 +653,8 @@ class RoomSession {
     const room = this.room, p = r.seat, L = p.label, now = p.access || 'read';
     if (!['read', 'edit', 'run'].includes(level) || level === now) return;
     if (room.busy[p.id] || (r.jobs || []).length) { room.note(`${L} is busy. Let it finish, or press Stop, before changing what it can do.`); return; }
+    // In a separate-copy room, only an agent working inside the copy can edit: the room promises your folder is untouched.
+    if (level !== 'read' && this.meta.copy && !editPolicy.within(p.cwd, this.meta.copy.dir)) { room.note(`In this room edits happen in the separate copy, and ${L} works in ${p.cwd}, outside it. Only an agent working in the copy can edit here.`); return; }
     const other = Object.values(this.slots).find((o) => o !== r && (o.seat.access || 'read') !== 'read');
     if (level !== 'read' && other) { room.note(`Only one agent in a room can edit files, and ${other.seat.label} already can. Set ${other.seat.label} to read only first.`); return; }
     if (level !== 'read' && now === 'read') {
@@ -678,7 +681,13 @@ class RoomSession {
   // needs the wagonWheel.allowBypass setting and a warning each time; it ends on Stop and when the room closes.
   async setMode(r, mode) {
     const room = this.room, p = r.seat, L = p.label, access = p.access || 'read';
-    if (!['ask', 'auto', 'bypass'].includes(mode) || mode === (p.mode || 'ask')) return;
+    if (!['ask', 'auto', 'bypass'].includes(mode)) return;
+    // Ask me also revokes any "Allow edits for this task" it had, even when it is already on Ask me.
+    if (mode === 'ask') {
+      const had = (room.state.allowRules || []).some((x) => x.seat === p.id); room.clearAllowRules(p.id);
+      if ((p.mode || 'ask') === 'ask') { if (had) { room.note(`${L}'s edits for this task are no longer allowed ahead of time: it asks you before each one again.`); this.save(); } return; }
+    }
+    if (mode === (p.mode || 'ask')) return;
     if (access === 'read') { room.note(`${L} can only read, so there is nothing to accept. Let it edit first.`); return; }
     if (mode === 'bypass' && access !== 'run') { room.note(`Bypass is for an agent that can also run commands. For ${L}, Auto-accept edits does the same for edits.`); return; }
     if (mode === 'bypass' && !this.options.allowBypass) { room.note('Bypass is off in your settings. To offer it, turn on "Wagon Wheel: Allow Bypass" (wagonWheel.allowBypass) in Settings.'); return; }

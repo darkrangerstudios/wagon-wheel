@@ -147,6 +147,11 @@
     row.appendChild(el('div', 'aptitle', a.title));
     if (a.reason) row.appendChild(el('div', 'apreason', a.reason));
     if (a.sensitive) row.appendChild(el('div', 'apwarn', `Look closely: ${a.sensitive}. This kind of file always asks, even when you've allowed the task's other edits.`));
+    if (a.cwd) row.appendChild(el('div', 'apreason', `Runs in: ${a.cwd}`));
+    if (a.commandCut) {
+      row.appendChild(el('small', 'note', `The command is ${Number(a.commandCut).toLocaleString()} characters; the first ${a.command.length.toLocaleString()} are shown. Read all of it before you allow it.`));
+      if (a.status === 'pending') { const full = el('button', 'link', 'Show the full command'); full.title = 'Opens the whole command in an editor tab.'; full.addEventListener('click', () => vscode.postMessage({ type: 'approvalFull', id: a.id })); row.appendChild(full); }
+    }
     if (a.detail) {
       const d = el('details', 'fold'); d.open = a.status === 'pending'; d.appendChild(el('summary', null, a.kind === 'command' ? 'Command' : 'Changes')); d.appendChild(el('pre', 'apdetail', a.detail));
       if (a.detailCut) {

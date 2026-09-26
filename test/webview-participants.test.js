@@ -167,3 +167,12 @@ test('the mode row: ask, auto-accept, and bypass only when allowed; mode-answere
   h.receive({ type: 'message', entry: { id: 30, from: 'system', kind: 'approval', ts: Date.now(), text: 'Run: rm x', approval: { id: 'a30', seat: 'codex', kind: 'command', title: 'Run: rm x', status: 'allowed', auto: 'bypass' } } });
   assert.match(h.ids.log.textContent, /Builder: Run: rm x · bypass, not asked/);
 });
+
+test('a cut command card says so, shows where it runs, and opens the full command', () => {
+  const { setup } = require('./fixtures/webview-dom');
+  const h = setup();
+  h.receive({ type: 'message', entry: { id: 40, from: 'system', kind: 'approval', ts: Date.now(), text: 'Run', approval: { id: 'a40', seat: 'codex', kind: 'command', title: 'Run outside the sandbox: printf', command: 'x'.repeat(4000), commandCut: 5000, cwd: '/fixture/app', status: 'pending' } } });
+  assert.match(h.ids.log.textContent, /Runs in: \/fixture\/app/);
+  assert.match(h.ids.log.textContent, /The command is 5,000 characters; the first 4,000 are shown/);
+  h.click(h.ids.log, 'Show the full command'); assert.deepEqual(h.sent.at(-1), { type: 'approvalFull', id: 'a40' });
+});

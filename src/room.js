@@ -355,9 +355,10 @@ class Room extends EventEmitter {
     const L = this.labels[name] || name, kind = req.kind === 'command' ? 'command' : 'edit';
     // What the card keeps: the change itself up to DETAIL_MAX characters (it says when it was cut), so a long run of
     // edits doesn't grow the saved room without bound.
-    const detail = req.detail ? String(req.detail) : null;
+    const detail = req.detail ? String(req.detail) : null, command = req.command ? String(req.command) : null;
     const card = { seat: name, kind, title: String(req.title || '').slice(0, 300), paths: (req.paths || []).slice(0, 20).map((p) => String(p).slice(0, 500)),
-      command: req.command ? String(req.command).slice(0, 2000) : null, detail: detail ? detail.slice(0, DETAIL_MAX) : null, ...(detail && detail.length > DETAIL_MAX ? { detailCut: detail.length } : {}),
+      command: command ? command.slice(0, DETAIL_MAX) : null, ...(command && command.length > DETAIL_MAX ? { commandCut: command.length } : {}), ...(req.cwd ? { cwd: String(req.cwd).slice(0, 500) } : {}),
+      detail: detail ? detail.slice(0, DETAIL_MAX) : null, ...(detail && detail.length > DETAIL_MAX ? { detailCut: detail.length } : {}),
       reason: req.reason ? String(req.reason).slice(0, 500) : null, ...(req.sensitive ? { sensitive: String(req.sensitive).slice(0, 300) } : {}), ...(req.noRule ? { noRule: true } : {}) };
     const record = (status, extra = {}, quiet = true) => this._append('system', card.title, { kind: 'approval', approval: { id: `a${this.state.seq + 1}`, ...card, status, ...extra } }, quiet);
     if (!this.agents[name] || !this._live(this.run)) { record('denied', { why: 'stopped' }); return Promise.resolve({ allow: false, why: 'stopped' }); }
@@ -375,8 +376,8 @@ class Room extends EventEmitter {
       record('allowed', { auto: true, detail: null, detailCut: undefined }); return Promise.resolve({ allow: true });
     }
     const entry = record('pending', { asked: this.now() });
-    // The whole change stays in memory while the card waits, so a cut card can still be read in full before answering.
-    return new Promise((resolve) => this.pendingApprovals.set(entry.approval.id, { entry, resolve, scope, name, kind, sensitive: !!card.sensitive || !!req.noRule, asked: this.now(), full: card.detailCut ? detail : null }));
+    // The whole change or command stays in memory while the card waits, so a cut card can be read in full before answering.
+    return new Promise((resolve) => this.pendingApprovals.set(entry.approval.id, { entry, resolve, scope, name, kind, sensitive: !!card.sensitive || !!req.noRule, asked: this.now(), full: card.commandCut ? command : card.detailCut ? detail : null }));
   }
 
   // decision: 'allow' | 'allowTask' (edits only) | 'deny'. Only the human's page calls this.
