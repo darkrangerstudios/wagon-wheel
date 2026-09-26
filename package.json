@@ -3,7 +3,7 @@
   "displayName": "Wagon Wheel",
   "icon": "media/icon.png",
   "description": "One VS Code room for your local Claude Code and Codex sessions. Named participants run as private child processes over stdio: no daemon, no open ports.",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "publisher": "darkrangerstudios",
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
@@ -278,6 +278,12 @@
             ],
             "order": 1,
             "description": "When agent work becomes a task."
+          },
+          "wagonWheel.allowBypass": {
+            "type": "boolean",
+            "default": false,
+            "order": 6,
+            "markdownDescription": "Offer **Bypass** in an agent's menu: its edits and commands go ahead without asking you. Even with this on, bypass is turned on per agent with a warning each time, ends on Stop and when the room closes, and Wagon Wheel still refuses edits outside the agent's folder and inside git's own folder. Leave off unless you need it."
           },
           "wagonWheel.agentPostsPerTask": {
             "type": "number",

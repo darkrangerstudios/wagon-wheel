@@ -3,7 +3,7 @@
   const vscode = acquireVsCodeApi();
   // The extension host keeps its code until the window reloads, but this script and the stylesheet load fresh.
   // If the page was built by a different version, say so instead of rendering a broken layout.
-  const EXPECT = '0.8.0';
+  const EXPECT = '0.8.1';
   if (document.body.dataset.wc !== EXPECT) {
     document.body.textContent = '';
     const box = document.createElement('div');
@@ -130,7 +130,15 @@
   // An agent asking to edit or run something. Only you answer it; Stop, closing the room or no answer denies it.
   const CARD_STATUS = { allowed: 'Allowed', allowedTask: 'Allowed, with its other edits for this task', denied: 'Denied', expired: 'Not answered: the room closed' };
   function approvalCard(entry) {
-    const a = entry.approval, row = el('div', `row approval ${a.status}`); row.dataset.approval = a.id;
+    const a = entry.approval;
+    if (a.auto) { // answered on your behalf (a mode, or edits you allowed for the task): one line, still on the record
+      const row = el('div', `row approval compact ${a.auto === 'bypass' ? 'bypass' : ''}`); row.dataset.approval = a.id;
+      row.appendChild(el('span', 'aptitle', `${NAMES[a.seat] || a.seat}: ${a.title}`));
+      row.appendChild(el('span', 'apstatus', a.auto === 'bypass' ? ' · bypass, not asked' : a.auto === 'auto' ? ' · auto-accepted' : ' · allowed with this task\'s edits'));
+      if (entry.ts) { const s = el('span', 'ts', stamp(entry.ts)); s.title = fullTime(entry.ts); row.appendChild(s); }
+      cards[a.id] = row; return row;
+    }
+    const row = el('div', `row approval ${a.status}`); row.dataset.approval = a.id;
     const head = el('div', 'aphead');
     const asks = a.status === 'pending' ? 'wants to' : 'asked to';
     head.appendChild(el('span', 'apwho', `${NAMES[a.seat] || a.seat} ${asks} ${a.kind === 'command' ? 'run a command' : 'edit'}`));
@@ -139,6 +147,11 @@
     row.appendChild(el('div', 'aptitle', a.title));
     if (a.reason) row.appendChild(el('div', 'apreason', a.reason));
     if (a.sensitive) row.appendChild(el('div', 'apwarn', `Look closely: ${a.sensitive}. This kind of file always asks, even when you've allowed the task's other edits.`));
+    if (a.cwd) row.appendChild(el('div', 'apreason', `Runs in: ${a.cwd}`));
+    if (a.commandCut) {
+      row.appendChild(el('small', 'note', `The command is ${Number(a.commandCut).toLocaleString()} characters; the first ${a.command.length.toLocaleString()} are shown. Read all of it before you allow it.`));
+      if (a.status === 'pending') { const full = el('button', 'link', 'Show the full command'); full.title = 'Opens the whole command in an editor tab.'; full.addEventListener('click', () => vscode.postMessage({ type: 'approvalFull', id: a.id })); row.appendChild(full); }
+    }
     if (a.detail) {
       const d = el('details', 'fold'); d.open = a.status === 'pending'; d.appendChild(el('summary', null, a.kind === 'command' ? 'Command' : 'Changes')); d.appendChild(el('pre', 'apdetail', a.detail));
       if (a.detailCut) {
@@ -282,7 +295,12 @@
       btn.appendChild(el('span', 'seatlabel', NAMES[name]));
       if (v) btn.appendChild(el('span', 'seatmodel', `${modelTag(name) || 'Default'} · ${v.effort ? effortName(provider(name), v.effort) : 'Default'}`));
       if (v && v.fast) btn.appendChild(el('span', 'bolt', '⚡'));
-      if (v && v.access && v.access !== 'read') { const x = el('span', 'access', v.access === 'run' ? 'can edit + run' : 'can edit'); x.title = 'Every edit' + (v.access === 'run' ? ' and command' : '') + ' asks you first.'; btn.appendChild(x); }
+      if (v && v.access && v.access !== 'read') {
+        const mode = v.mode || 'ask';
+        const x = el('span', `access ${mode}`, `${v.access === 'run' ? 'can edit + run' : 'can edit'}${mode === 'auto' ? ' · auto' : mode === 'bypass' ? ' · bypass' : ''}`);
+        x.title = mode === 'bypass' ? 'Bypass: its edits and commands go ahead without asking you.' : mode === 'auto' ? 'Auto-accepts edits in its folder; commands and files that can run code still ask.' : 'Every edit' + (v.access === 'run' ? ' and command' : '') + ' asks you first.';
+        btn.appendChild(x);
+      }
       btn.title = `${NAMES[name]} (@${name}): click for its settings: model, thinking, and which conversation it's on${p.cwd ? '\n' + p.cwd : ''}`;
       btn.setAttribute('aria-label', `${NAMES[name]} controls`);
       btn.addEventListener('click', () => openPop(name)); box.appendChild(btn);
@@ -585,6 +603,21 @@
     perm.appendChild(pseg);
     if (c.editorElsewhere) perm.appendChild(el('small', 'note', 'Only one agent in a room can edit files, and another one already can.'));
     pop.appendChild(perm);
+    // How its requests are answered, once it can edit: like the Claude Code and Codex apps' own modes.
+    if ((c.access || 'read') !== 'read') {
+      const md = el('div'); md.appendChild(el('div', 'lbl', 'When it asks'));
+      const mseg = el('div', 'seg');
+      const modes = [['ask', 'Ask me', 'Every edit' + (c.access === 'run' ? ' and command' : '') + ' asks you first.'], ['auto', 'Auto-accept edits', 'Edits in its folder go ahead and show as a line in the room. Commands, and files that can run code, still ask.']];
+      if (c.access === 'run') modes.push(['bypass', 'Bypass', c.allowBypass ? 'Edits and commands go ahead without asking. Asks you to confirm first; Stop turns it off.' : 'Turn on "Wagon Wheel: Allow Bypass" in Settings to offer this.']);
+      for (const [v, text, tip] of modes) {
+        const b = el('button', `${v === (c.mode || 'ask') ? 'on' : ''}${v === 'bypass' ? ' danger' : ''}`, text); b.title = tip; b.disabled = v === 'bypass' && !c.allowBypass;
+        b.addEventListener('click', () => { cmd(`/${name} mode ${v}`); closePop(); }); mseg.appendChild(b);
+      }
+      md.appendChild(mseg);
+      if (c.mode === 'bypass') md.appendChild(el('small', 'note warnnote', 'Bypass is on: edits and commands go ahead without asking. Stop turns it off.'));
+      else if (c.access === 'run' && !c.allowBypass) md.appendChild(el('small', 'note', 'Bypass is off in Settings (Wagon Wheel: Allow Bypass).'));
+      pop.appendChild(md);
+    }
     // Which conversation this agent is on, in words, with a way to find it again in Claude Code or Codex.
     const ws = el('div', 'conv'); ws.appendChild(el('div', 'lbl', 'Conversation'));
     const src = c.source, app = kind === 'claude' ? 'Claude Code' : 'Codex', short = (x) => String(x).slice(0, 8);
@@ -635,6 +668,7 @@
       : (lvl === 'read' ? 'Can read files and run look-only commands. Can\'t edit files, use the web or connectors.' : lvl === 'edit' ? 'Can read files and run look-only commands, and edit files after you allow it. Can\'t use the web or connectors.' : 'Can read files, and edit files or run commands after you allow it; an allowed command runs outside its sandbox.'));
     cap.title = kind === 'claude' ? `Read, Glob and Grep inside the room folder, plus the room tools (ask the other agent, read shared history, finish a task).${lvl === 'read' ? ' No edits, no shell' : lvl === 'edit' ? ' Edit, Write and NotebookEdit ask you first, one card each; no shell' : ' Edit, Write, NotebookEdit and Bash ask you first, one card each'}. No web, no other MCP servers. Your own Claude settings do not apply here.`
       : `Read-only sandbox for local inspection, plus the room tools when its thread has them. Read access is not confined to the room folder. ${lvl === 'read' ? 'Every approval request is declined.' : lvl === 'edit' ? 'Each file change asks you first; commands that need more than the sandbox are declined.' : 'Each file change, and each command that needs more than the sandbox, asks you first.'} Web search, connected apps and external MCP tools are disabled and checked before the thread is used.`;
+    if ((c.mode || 'ask') !== 'ask' && lvl !== 'read') cap.textContent += c.mode === 'bypass' ? ' Bypass is on: edits and commands go ahead without asking.' : ' Auto-accept is on: edits in its folder go ahead without asking.';
     pop.appendChild(cap);
     const save = el('button', 'link', 'Use these settings for new rooms');
     save.addEventListener('click', () => { vscode.postMessage({ type: 'saveDefaults', vendor: name }); closePop(); });

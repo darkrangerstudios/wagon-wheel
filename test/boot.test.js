@@ -6,7 +6,7 @@ const assert = require('node:assert');
 const fs = require('fs'), os = require('os'), path = require('path');
 const Module = require('module');
 
-let experimentalAgents, acpBehavior;
+let experimentalAgents, acpBehavior, allowBypass;
 const acpStarts = [];
 class FakeAcp {
   constructor(o) { this.o = o; this.capabilities = { loadSession: true }; this.calls = []; this.stops = 0; }
@@ -16,7 +16,7 @@ class FakeAcp {
   stop() { this.stops++; }
 }
 const stubs = {
-  vscode: { workspace: { getConfiguration: () => ({ get: (key) => key === 'experimentalAgents' ? experimentalAgents : undefined, inspect: (key) => key === 'experimentalAgents' && experimentalAgents !== undefined ? { workspaceValue: experimentalAgents } : undefined, update: async () => {} }), workspaceFolders: undefined, isTrusted: true },
+  vscode: { workspace: { getConfiguration: () => ({ get: (key) => key === 'experimentalAgents' ? experimentalAgents : key === 'allowBypass' ? allowBypass : undefined, inspect: (key) => key === 'experimentalAgents' && experimentalAgents !== undefined ? { workspaceValue: experimentalAgents } : undefined, update: async () => {} }), workspaceFolders: undefined, isTrusted: true },
     ConfigurationTarget: { Global: 1 }, window: {}, commands: { executeCommand: async () => {} }, env: {}, Uri: { file: (p) => ({ fsPath: p }) } },
 };
 let fakeThreadSeq = 0;
@@ -301,4 +301,61 @@ test('editing agents: the room asks you, refuses paths outside the folder, keeps
     assert.strictEqual(s.room.pendingApprovals.size, 1);
   } finally { s.dispose(); delete stubs.vscode.window.showWarningMessage; }
   assert.strictEqual(s.room.state.transcript.filter((e) => e.kind === 'approval').at(-1).approval.status, 'denied', 'closing the room denied the waiting card');
+});
+
+test('modes: auto from the menu; bypass needs the setting and a warning each time; Stop and reopening turn modes off', async () => {
+  const dir = fs.realpathSync(os.tmpdir());
+  const meta = { ...newMeta('modes'), seats: [{ id: 'codex', label: 'Codex', provider: 'codex', cwd: dir, access: 'run', mode: 'bypass' }, { id: 'claude', label: 'Claude', provider: 'claude', cwd: dir }] };
+  const warned = []; stubs.vscode.window.showWarningMessage = async (m, o, ...choices) => { warned.push(m); return choices[0]; };
+  allowBypass = false;
+  const s = new RoomSession(context(), meta, null);
+  try {
+    await s.boot({});
+    const p = s.slots.codex.seat;
+    assert.strictEqual(p.mode, 'ask', 'bypass never survives a reopen');
+    assert.ok(s.room.state.transcript.some((e) => /bypass mode ended when the room closed/.test(e.text)));
+    await s.runCommand('/codex mode auto'); assert.strictEqual(p.mode, 'auto');
+    assert.strictEqual(s.room.modeFor('codex'), 'auto');
+    await s.runCommand('/codex mode bypass'); assert.strictEqual(p.mode, 'auto', 'refused while the setting is off');
+    assert.match(s.room.state.transcript.at(-1).text, /Bypass is off in your settings/);
+    s.options.allowBypass = true;
+    await s.runCommand('/codex mode bypass'); assert.strictEqual(p.mode, 'bypass');
+    assert.match(warned.at(-1), /Let Codex edit files and run commands without asking you\?/);
+    s.room.postFromHuman('@codex go'); s.room.stopAll();
+    assert.strictEqual(p.mode, 'ask', 'Stop turns it off');
+    assert.ok(s.room.state.transcript.some((e) => /Stop turned off Codex's bypass mode/.test(e.text)));
+    await s.runCommand('/claude mode auto');
+    assert.match(s.room.state.transcript.at(-1).text, /can only read/);
+    p.mode = 'bypass'; s.room.busy.codex = false;
+    await s.runCommand('/codex access edit');
+    assert.strictEqual(p.mode, 'ask', 'a mode never outlives the level it needs');
+  } finally { s.dispose(); delete stubs.vscode.window.showWarningMessage; allowBypass = undefined; }
+});
+
+test('Codex review of 1ffa549: commands outside the folder are refused; a copy room only lets agents in the copy edit; Ask me revokes the task allowance', async () => {
+  const dir = fs.realpathSync(os.tmpdir()), copyDir = fs.mkdtempSync(path.join(dir, 'ww-copy-')), other = fs.mkdtempSync(path.join(dir, 'ww-other-'));
+  const meta = { ...newMeta('fixes'), copy: { repo: dir, dir: copyDir, branch: 'wagon-wheel/x', base: 'abc' }, seats: [
+    { id: 'claude', label: 'Claude', provider: 'claude', cwd: copyDir, access: 'edit' }, { id: 'codex', label: 'Codex', provider: 'codex', cwd: other }] };
+  stubs.vscode.window.showWarningMessage = async (m, o, ...choices) => choices[0];
+  const s = new RoomSession(context(), meta, null);
+  try {
+    await s.boot({});
+    // P1-3: the reader outside the copy can't be made the editor.
+    await s.runCommand('/claude access read');
+    await s.runCommand('/codex access run');
+    assert.strictEqual(s.slots.codex.seat.access, 'read');
+    assert.match(s.room.state.transcript.at(-1).text, /edits happen in the separate copy, and Codex works in .*outside it/);
+    // P1-2: a command whose directory is outside the agent's folder is refused before any card.
+    s.room.postFromHuman('@codex go'); await new Promise((res) => setImmediate(res));
+    s.slots.codex.seat.access = 'run'; s.room.busy.codex = true;
+    const r = await s.slots.codex.client.o.onApproval({ kind: 'command', command: 'rm -rf build', cwd: '/', reason: '' });
+    assert.deepStrictEqual(r, { allow: false, why: 'it would run outside its folder' });
+    // P2-4: Ask me (already selected) still revokes "Allow edits for this task".
+    s.slots.codex.seat.access = 'edit'; s.room.state.allowRules = [{ seat: 'codex', scope: s.room._approvalScope() }];
+    await s.runCommand('/codex mode ask');
+    assert.deepStrictEqual(s.room.state.allowRules, []);
+    assert.match(s.room.state.transcript.at(-1).text, /no longer allowed ahead of time/);
+    s.room.requestApproval('codex', { kind: 'edit', title: 'Edit x', paths: [path.join(other, 'x')] });
+    assert.strictEqual(s.room.state.transcript.at(-1).approval.status, 'pending');
+  } finally { s.dispose(); delete stubs.vscode.window.showWarningMessage; }
 });

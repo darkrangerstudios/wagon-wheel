@@ -267,3 +267,12 @@ body.dropping .composer { box-shadow: 0 0 0 3px var(--focus); }
 .copybar { font-family: var(--vscode-font-family); font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; margin-top: 2px; }
 .copybar .copywhat { color: var(--muted); }
 .chip .access { font-size: .78em; padding: 0 5px; border-radius: 6px; border: 1px solid var(--line); margin-left: 4px; }
+
+.row.approval.compact { display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; padding: 3px 10px; border-left-width: 2px; font-size: .88em; }
+.row.approval.compact .aptitle { font-weight: 400; }
+.row.approval.compact .ts { margin-left: auto; }
+.row.approval.compact.bypass { border-left-color: var(--vscode-editorError-foreground, #f14c4c); }
+.chip .access.bypass { color: var(--vscode-editorError-foreground, #f14c4c); border-color: currentColor; }
+.chip .access.auto { color: var(--vscode-editorWarning-foreground, #cca700); border-color: currentColor; }
+.seg button.danger { color: var(--vscode-editorError-foreground, #f14c4c); }
+.note.warnnote { color: var(--vscode-editorError-foreground, #f14c4c); }

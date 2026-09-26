@@ -159,6 +159,7 @@ function settings() {
     codexEffort: c.get('codexEffort') || null,
     bothMode: c.get('bothMode') || 'sequential',
     taskMode: ['auto', 'chat', 'work'].includes(c.get('taskMode')) ? c.get('taskMode') : 'auto',
+    allowBypass: c.get('allowBypass') === true,
     agentPosts: Number.isInteger(c.get('agentPostsPerTask')) ? Math.min(20, Math.max(0, c.get('agentPostsPerTask'))) : 3,
     // Three plain numbers; a taskDefaults object saved before v0.5 still applies until they are set.
     taskDefaults: cleanLimits({ ...PRESETS.balanced, ...(c.get('taskDefaults') || {}), ...Object.fromEntries([['turns', 'taskTurns'], ['reserve', 'taskReserve'], ['minutes', 'taskMinutes']].filter(([, key]) => c.isSet(key)).map(([k, key]) => [k, c.get(key)])) }),
@@ -255,9 +256,10 @@ class RoomSession {
     const gone = () => this.disposed || !this.room || r.client !== client;
     if (gone()) return { allow: false, why: 'the room is closed' };
     const root = r.seat.cwd;
+    if (req.kind === 'command' && !req.cwd) req = { ...req, cwd: root }; // Claude runs commands in its own folder
     let verdict = { refused: null, sensitive: null };
     if (req.kind === 'edit') verdict = editPolicy.check(req.paths || [], root, await editPolicy.gitDirs(root));
-    else if ((req.paths || []).some((x) => !editPolicy.within(editPolicy.abs(root, x), root))) verdict.refused = 'outside its folder';
+    else if ((req.paths || []).some((x) => !editPolicy.within(editPolicy.abs(root, x), root))) verdict.refused = 'it would run outside its folder';
     if (gone()) return { allow: false, why: 'the room is closed' };
     return this.room.requestApproval(r.seat.id, { ...req, refused: req.refused || verdict.refused, sensitive: verdict.sensitive });
   }
@@ -321,6 +323,8 @@ class RoomSession {
     const s = this.options = settings(), m = this.meta;
     m.humanName = s.userName; this.claudeVersion = s.claude.version;
     m.seats = normalizeParticipants(m, s);
+    // Bypass is per session: a reopened room starts asking again.
+    for (const p of m.seats) if (p.mode === 'bypass') { p.mode = 'ask'; this.pendingNotes = [...(this.pendingNotes || []), `${p.label}'s bypass mode ended when the room closed, so it asks you again. Turn it back on from its menu if you want it.`]; }
     if (m.ideContext === undefined) m.ideContext = c_ide();
     if (m.bothMode === undefined) m.bothMode = s.bothMode;
     if (m.defaultTarget === undefined || (m.defaultTarget !== 'both' && !m.seats.some((p) => p.id === m.defaultTarget))) m.defaultTarget = m.seats.some((p) => p.id === s.defaultTarget) ? s.defaultTarget : m.seats[0].id;
@@ -410,7 +414,7 @@ class RoomSession {
         : ((r.models || []).find((x) => x.id === p.model) || (p.model ? {} : (r.models || [])[0]) || {}).displayName;
       return [name || p.model, p.effort, p.fast ? '⚡' : ''].filter(Boolean).join(' · ');
     };
-    this.room = new Room({ agents, state: this.state, humanName: m.humanName, defaultTarget: m.defaultTarget, bothMode: m.bothMode, labelFor, readHistory: (id, args) => this.history.read(id, args), labels: Object.fromEntries(m.participants.map((p) => [p.id, p.label])), postCap: s.agentPosts });
+    this.room = new Room({ agents, state: this.state, humanName: m.humanName, defaultTarget: m.defaultTarget, bothMode: m.bothMode, labelFor, readHistory: (id, args) => this.history.read(id, args), labels: Object.fromEntries(m.participants.map((p) => [p.id, p.label])), postCap: s.agentPosts, modeFor: (id) => (this.slots[id] ? this.slots[id].seat.mode || 'ask' : 'ask') });
     for (const note of this.pendingNotes || []) this.room.note(note); this.pendingNotes = null;
     if (!this.room.tasks.state.defaults) { this.room.tasks.setDefaults(s.taskDefaults); this.room.tasks.mode = s.taskMode; }
     for (const x of seeds) this.room.seedHistory(x.items, x.owner, x.readers.filter((id) => agents[id]));
@@ -421,6 +425,10 @@ class RoomSession {
     this.room.on('status', (st) => { const r = this.slots[st.name]; this.post({ type: 'status', ...st, participantUsage: r?.client.lastTurnUsage || null, participantCost: r?.client.totalCostUsd }); });
     this.room.on('stop', () => {
       this.switchEpoch = (this.switchEpoch || 0) + 1; for (const r of Object.values(this.slots)) if (r.switchClient) r.switchClient.stop();
+      // Stop also ends auto-accept and bypass: after a Stop, every edit asks again.
+      const loud = Object.values(this.slots).filter((r) => r.seat.mode && r.seat.mode !== 'ask').map((r) => `${r.seat.label}'s ${r.seat.mode === 'bypass' ? 'bypass' : 'auto-accept'} mode`);
+      for (const r of Object.values(this.slots)) r.seat.mode = 'ask';
+      if (loud.length) { this.room.note(`Stop turned off ${loud.join(' and ')}: every edit asks you again.`); this.postMeta(); }
       // Stop covers background jobs too: they would otherwise keep working and report back later.
       for (const r of Object.values(this.slots)) { const n = r.client && r.client.stopJobs ? r.client.stopJobs() : 0; if (n) this.room.note(`${r.seat.label}: stopped ${n} background job${n === 1 ? '' : 's'}.`); }
     });
@@ -508,7 +516,7 @@ class RoomSession {
       else if (m.type === 'approvalFull' && this.room && typeof m.id === 'string') {
         const p = this.room.pendingApprovals.get(m.id);
         // A read-only view (the room's own document scheme), so closing VS Code never asks to save it.
-        if (p && p.full) { const key = `/change-${m.id}-${Date.now()}.diff`; proposed.set(key, p.full); vscode.workspace.openTextDocument(vscode.Uri.parse(`wagon-wheel-proposed:${key}`)).then((d) => vscode.window.showTextDocument(d, { preview: true }), (e) => log(`full change: ${e.message}`)); }
+        if (p && p.full) { const key = `/change-${m.id}-${Date.now()}.${p.kind === 'command' ? 'sh' : 'diff'}`; proposed.set(key, p.full); vscode.workspace.openTextDocument(vscode.Uri.parse(`wagon-wheel-proposed:${key}`)).then((d) => vscode.window.showTextDocument(d, { preview: true }), (e) => log(`full change: ${e.message}`)); }
       }
       else if (m.type === 'copy' && this.room && this.meta.copy && ['open', 'bringIn', 'remove', 'refresh'].includes(m.action)) this.copyAction(m.action).catch((e) => this.room && this.room.note(`Separate copy: ${e.message}`));
       else if (m.type === 'moveOut' && this.room && this.slots[m.vendor]) this.moveOut(m.vendor).catch((e) => this.room && this.room.note(`Couldn't move the conversation out: ${e.message}`));
@@ -645,6 +653,8 @@ class RoomSession {
     const room = this.room, p = r.seat, L = p.label, now = p.access || 'read';
     if (!['read', 'edit', 'run'].includes(level) || level === now) return;
     if (room.busy[p.id] || (r.jobs || []).length) { room.note(`${L} is busy. Let it finish, or press Stop, before changing what it can do.`); return; }
+    // In a separate-copy room, only an agent working inside the copy can edit: the room promises your folder is untouched.
+    if (level !== 'read' && this.meta.copy && !editPolicy.within(p.cwd, this.meta.copy.dir)) { room.note(`In this room edits happen in the separate copy, and ${L} works in ${p.cwd}, outside it. Only an agent working in the copy can edit here.`); return; }
     const other = Object.values(this.slots).find((o) => o !== r && (o.seat.access || 'read') !== 'read');
     if (level !== 'read' && other) { room.note(`Only one agent in a room can edit files, and ${other.seat.label} already can. Set ${other.seat.label} to read only first.`); return; }
     if (level !== 'read' && now === 'read') {
@@ -656,12 +666,40 @@ class RoomSession {
       if (took) { room.note(`Only one agent in a room can edit files, and ${took.seat.label} already can.`); return; }
     }
     p.access = level; room.clearAllowRules(p.id);
+    if (p.mode && p.mode !== 'ask' && (level === 'read' || (p.mode === 'bypass' && level !== 'run'))) p.mode = 'ask'; // a mode never outlives the level it needs
     if (p.provider === 'claude') {
       const effort = p.effort === ULTRACODE && level !== 'read' ? 'xhigh' : undefined; if (effort) p.effort = effort;
       r.client.systemPrompt = this.brief(r, true); r.client.setOptions({ access: level, ...(effort ? { effort } : {}) });
     } else r.client.access = level;
     const text = { read: 'read only', edit: 'able to edit files, asking you before each edit', run: 'able to edit files and run commands, asking you before each one' }[level];
     room.note(`${L} is now ${text}.${p.provider === 'claude' && p.effort === 'xhigh' && level !== 'read' ? ' Its effort changed from Ultracode to Extra high: Ultracode is for read-only agents.' : ''}`);
+    this.save();
+  }
+
+  // Ask me / Auto-accept edits / Bypass. The room answers on the person's behalf, after its own refusals (outside the
+  // folder, git's folder, unseen changes), so nothing a mode allows is invisible: each is a line in the room. Bypass
+  // needs the wagonWheel.allowBypass setting and a warning each time; it ends on Stop and when the room closes.
+  async setMode(r, mode) {
+    const room = this.room, p = r.seat, L = p.label, access = p.access || 'read';
+    if (!['ask', 'auto', 'bypass'].includes(mode)) return;
+    // Ask me also revokes any "Allow edits for this task" it had, even when it is already on Ask me.
+    if (mode === 'ask') {
+      const had = (room.state.allowRules || []).some((x) => x.seat === p.id); room.clearAllowRules(p.id);
+      if ((p.mode || 'ask') === 'ask') { if (had) { room.note(`${L}'s edits for this task are no longer allowed ahead of time: it asks you before each one again.`); this.save(); } return; }
+    }
+    if (mode === (p.mode || 'ask')) return;
+    if (access === 'read') { room.note(`${L} can only read, so there is nothing to accept. Let it edit first.`); return; }
+    if (mode === 'bypass' && access !== 'run') { room.note(`Bypass is for an agent that can also run commands. For ${L}, Auto-accept edits does the same for edits.`); return; }
+    if (mode === 'bypass' && !this.options.allowBypass) { room.note('Bypass is off in your settings. To offer it, turn on "Wagon Wheel: Allow Bypass" (wagonWheel.allowBypass) in Settings.'); return; }
+    if (mode === 'bypass') {
+      const go = await vscode.window.showWarningMessage(`Let ${L} edit files and run commands without asking you?`, { modal: true,
+        detail: `Bypass skips every card. Commands run the moment ${L} asks, with your user account${p.provider === 'codex' ? ' and outside Codex\'s sandbox' : ''}, and can change or delete anything you can. Wagon Wheel still refuses edits outside ${p.cwd} and inside git's own folder, and records each action in the room. Stop turns bypass off, and so does closing the room. Use it only for work you'd let ${L} do unattended.` }, 'Turn on bypass');
+      if (go !== 'Turn on bypass' || this.disposed || (p.access || 'read') !== 'run') return;
+    }
+    p.mode = mode;
+    room.note(mode === 'ask' ? `${L} asks you before each ${access === 'run' ? 'edit and command' : 'edit'} again.`
+      : mode === 'auto' ? `${L} auto-accepts edits in its folder; each shows as a line in the room. Commands, and files that can run code, still ask. Stop turns this off.`
+      : `Bypass is on for ${L}: its edits and commands go ahead without asking. Each shows as a line in the room. Stop turns it off.`);
     this.save();
   }
 
@@ -798,7 +836,7 @@ class RoomSession {
         session: r.client?.sessionId || p.sessionId || p.forkFrom, typed: !!p.typed,
         shared: !!this.history?.describe().share[p.id], readers: this.history ? this.history.readers(p.id) : [], allHistory: !this.history || this.history.allHistory(p.id),
         cli: p.provider === 'claude' && v ? v.join('.') : undefined, model: p.model || models[0]?.id || null, effort: p.effort, fast: !!p.fast, models,
-        jobs: r.jobs || [], access: p.access || 'read', editorElsewhere: Object.values(this.slots).some((o) => o !== r && (o.seat.access || 'read') !== 'read'),
+        jobs: r.jobs || [], access: p.access || 'read', mode: p.mode || 'ask', allowBypass: !!(this.options && this.options.allowBypass), editorElsewhere: Object.values(this.slots).some((o) => o !== r && (o.seat.access || 'read') !== 'read'),
         efforts: p.provider === 'claude' ? (() => { const cat = claudeMenu().find((x) => x.id === (p.model || 'default')); return cat ? claudeEfforts(cat, v, p.access) : commands.CLAUDE_EFFORTS; })() : undefined }];
     }));
   }
@@ -818,6 +856,7 @@ class RoomSession {
       const p = r.seat, action = spec.action;
       if (action === 'session') { await this.switchSession(p.id, arg); return; }
       if (action === 'access') { await this.setAccess(r, arg); this.postMeta(); return; }
+      if (action === 'mode') { await this.setMode(r, arg); this.postMeta(); return; }
       if (action === 'model' || action === 'effort') {
         if (p.provider === 'claude') {
           const cat = claudeMenu().find((x) => x.id === arg);

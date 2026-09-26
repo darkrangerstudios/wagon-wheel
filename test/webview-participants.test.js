@@ -153,3 +153,26 @@ test('a room in a separate copy says so, counts changes, and offers open / bring
   assert.match(h.ids.ids.textContent, /Working in a separate copy · branch wagon-wheel\/x-1 · 2 changed files, 1 commit/);
   h.click(h.ids.ids, 'Bring changes into your folder'); assert.deepEqual(h.sent.at(-1), { type: 'copy', action: 'bringIn' });
 });
+
+test('the mode row: ask, auto-accept, and bypass only when allowed; mode-answered actions are one line', () => {
+  const { setup, walk } = require('./fixtures/webview-dom');
+  const h = setup();
+  Object.assign(h.controls.codex, { access: 'run', mode: 'auto', allowBypass: false });
+  h.receive({ type: 'meta', meta: h.meta, controls: h.controls });
+  assert.match(h.ids.participants.textContent, /can edit \+ run · auto/);
+  h.click(h.ids.participants, 'Builder controls');
+  assert.match(h.ids.pop.textContent, /When it asks/);
+  assert.ok(walk(h.ids.pop).find((e) => e.tagName === 'button' && e.textContent === 'Bypass').disabled);
+  h.click(h.ids.pop, 'Ask me'); assert.deepEqual(h.sent.at(-1), { type: 'command', text: '/codex mode ask' });
+  h.receive({ type: 'message', entry: { id: 30, from: 'system', kind: 'approval', ts: Date.now(), text: 'Run: rm x', approval: { id: 'a30', seat: 'codex', kind: 'command', title: 'Run: rm x', status: 'allowed', auto: 'bypass' } } });
+  assert.match(h.ids.log.textContent, /Builder: Run: rm x · bypass, not asked/);
+});
+
+test('a cut command card says so, shows where it runs, and opens the full command', () => {
+  const { setup } = require('./fixtures/webview-dom');
+  const h = setup();
+  h.receive({ type: 'message', entry: { id: 40, from: 'system', kind: 'approval', ts: Date.now(), text: 'Run', approval: { id: 'a40', seat: 'codex', kind: 'command', title: 'Run outside the sandbox: printf', command: 'x'.repeat(4000), commandCut: 5000, cwd: '/fixture/app', status: 'pending' } } });
+  assert.match(h.ids.log.textContent, /Runs in: \/fixture\/app/);
+  assert.match(h.ids.log.textContent, /The command is 5,000 characters; the first 4,000 are shown/);
+  h.click(h.ids.log, 'Show the full command'); assert.deepEqual(h.sent.at(-1), { type: 'approvalFull', id: 'a40' });
+});

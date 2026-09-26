@@ -64,7 +64,8 @@ function participantSpecs({ participants, controls = {} }) {
       command('fast', { args: ['on', 'off'], desc: p.provider === 'claude' ? 'Opus fast mode; billed to usage credits' : 'Priority tier: faster, uses more of your Codex quota' }),
       command('compact', { desc: `Summarize ${p.label || p.id}'s conversation to free up space` }),
       command('session', { args: ['new', 'switch', 'continue', 'fork'], desc: `Start ${p.label || p.id} over (new), or switch it to one of your conversations (switch asks copy or original)` }),
-      command('access', { args: ['read', 'edit', 'run'], desc: `What ${p.label || p.id} may do: read only, edit files, or edit files and run commands (each edit and command asks you first)` })
+      command('access', { args: ['read', 'edit', 'run'], desc: `What ${p.label || p.id} may do: read only, edit files, or edit files and run commands (each edit and command asks you first)` }),
+      command('mode', { args: ['ask', 'auto', 'bypass'], desc: `How ${p.label || p.id}'s edits are answered: ask you each time, auto-accept edits, or bypass (edits and commands without asking; needs the Allow Bypass setting)` })
     ];
   }));
 }

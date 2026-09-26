@@ -233,3 +233,48 @@ test('a Codex request to write to a whole folder never falls under "Allow edits 
   r.answerApproval(r.state.transcript.at(-1).approval.id, 'allowTask');
   assert.strictEqual(r.state.transcript.at(-1).approval.status, 'allowed', 'and never becomes the rule');
 });
+
+test('modes answer for the human after the host\'s refusals: auto takes ordinary edits, bypass takes edits and commands', async () => {
+  const modes = { claude: 'auto', codex: 'bypass' };
+  const r = room({ modeFor: (n) => modes[n] }); r.postFromHuman('@claude @codex go');
+  assert.deepStrictEqual(await r.requestApproval('claude', edit()), { allow: true });
+  assert.strictEqual(r.state.transcript.at(-1).approval.auto, 'auto');
+  r.requestApproval('claude', { kind: 'command', title: 'Run: ls', command: 'ls' });
+  assert.strictEqual(r.state.transcript.at(-1).approval.status, 'pending', 'auto: commands still ask');
+  r.requestApproval('claude', { ...edit('Edit package.json'), sensitive: 'x' });
+  assert.strictEqual(r.state.transcript.at(-1).approval.status, 'pending', 'auto: files that can run code still ask');
+  r.requestApproval('claude', { ...edit(), noRule: true });
+  assert.strictEqual(r.state.transcript.at(-1).approval.status, 'pending', 'auto: a folder-wide write still asks');
+  assert.deepStrictEqual(await r.requestApproval('codex', { kind: 'command', title: 'Run: rm x', command: 'rm x' }), { allow: true });
+  assert.strictEqual(r.state.transcript.at(-1).approval.auto, 'bypass');
+  assert.strictEqual((await r.requestApproval('codex', { ...edit('Edit package.json'), sensitive: 'x' })).allow, true);
+  for (const why of ['outside its folder', 'inside git\'s own folder, where an edit can run commands', 'Wagon Wheel couldn\'t see which files it would change']) {
+    assert.deepStrictEqual(await r.requestApproval('codex', { ...edit(), refused: why }), { allow: false, why }, `bypass never overrides: ${why}`);
+  }
+});
+
+// ---------- Codex review of 1ffa549 ----------
+test('a long command is never approved unseen: the card says it was cut and the full text waits with it', async () => {
+  const r = room(); r.postFromHuman('@claude @codex go');
+  const cmd = `printf SAFE #${'.'.repeat(4100)}\nprintf HIDDEN_OPERATION`;
+  r.requestApproval('claude', { kind: 'command', title: 'Run: printf SAFE', command: cmd });
+  const card = r.state.transcript.at(-1).approval;
+  assert.deepStrictEqual([card.command.length, card.commandCut], [4000, cmd.length]);
+  assert.strictEqual(r.pendingApprovals.get(card.id).full, cmd, 'the whole command can be read before answering');
+});
+
+test('a Codex command card shows where it runs, and that folder is checked like a path', () => {
+  const a = codexCard({ kind: 'command', command: 'rm -rf build', cwd: '/other-project' }, (x) => x);
+  const b = codexCard({ kind: 'command', command: 'rm -rf build', cwd: '/workspace' }, (x) => x);
+  assert.notDeepStrictEqual(a, b);
+  assert.deepStrictEqual([a.cwd, a.paths], ['/other-project', ['/other-project']]);
+});
+
+test('Claude cards say "every match" and name notebook deletes and inserts', () => {
+  const rel = (p) => p;
+  assert.match(claudeCard({ tool: 'Edit', input: { file_path: 'a.js', old_string: 'x', new_string: 'y', replace_all: true } }, rel).title, /every match/);
+  assert.notStrictEqual(claudeCard({ tool: 'Edit', input: { file_path: 'a.js', old_string: 'x', new_string: 'y', replace_all: true } }, rel).title, claudeCard({ tool: 'Edit', input: { file_path: 'a.js', old_string: 'x', new_string: 'y' } }, rel).title);
+  const del = claudeCard({ tool: 'NotebookEdit', input: { notebook_path: 'n.ipynb', cell_id: 'critical', edit_mode: 'delete', new_source: '' } }, rel);
+  assert.strictEqual(del.title, 'Delete cell critical in notebook n.ipynb'); assert.match(del.detail, /Deletes cell critical/);
+  assert.match(claudeCard({ tool: 'NotebookEdit', input: { notebook_path: 'n.ipynb', cell_id: 'c1', edit_mode: 'insert', new_source: 'x' } }, rel).title, /^Insert a new cell after cell c1/);
+});
