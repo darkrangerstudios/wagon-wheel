@@ -9,6 +9,7 @@ const AGENTS = ['claude', 'codex'];
 const LABEL = { claude: 'Claude', codex: 'Codex', system: 'Wagon Wheel' };
 const ID = /^[a-z][a-z0-9-]{0,31}$/;
 const esc = (n) => n.replace(/[-]/g, '\\-');
+const DETAIL_MAX = 4000; // characters of a change kept on its approval card
 const nameRe = (names) => names.slice().sort((a, b) => b.length - a.length).map(esc).join('|');
 
 // @name for each participant, plus @both / @all. Ignores e-mail-like text (x@codex.com) by requiring a
@@ -73,7 +74,7 @@ class Room extends EventEmitter {
   // readHistory(requester, args): shared session history (extension glue over sessionHistory.js); optional.
   // postCap: most posts one agent may make on its own (see unprompted) per task, or per human message outside a task.
   // labels: display names by participant id (defaults: Claude, Codex, else the id capitalised).
-  constructor({ agents, hopCap = 2, state = null, humanName = 'You', defaultTarget = 'claude', bothMode = 'sequential', labelFor = null, maxTurns = 2, now = Date.now, proseHandoffs = false, readHistory = null, labels = {}, postCap = 3 }) {
+  constructor({ agents, hopCap = 2, state = null, humanName = 'You', defaultTarget = 'claude', bothMode = 'sequential', labelFor = null, maxTurns = 2, now = Date.now, proseHandoffs = false, readHistory = null, labels = {}, postCap = 3, approvalTimeoutMs = 15 * 60e3 }) {
     super();
     this.agents = agents; this.hopCap = hopCap; this.human = humanName;
     this.names = Object.keys(agents);
@@ -82,6 +83,7 @@ class Room extends EventEmitter {
     this.defaultTarget = defaultTarget; this.bothMode = bothMode; this.labelFor = labelFor;
     this.maxTurns = maxTurns; this.turns = this._each(0); this.turnNoted = {};
     this.postCap = postCap; this.lastRun = this._each(0); this.posting = new Set(); // agents in a turn they started on their own
+    this.approvalTimeoutMs = approvalTimeoutMs; this.pendingApprovals = new Map(); this.now = now;
     this.state = state || { transcript: [], cursors: this._each(0), lastTargets: [...this.names], seq: 0 };
     // A participant added to an existing room starts at the present: the room's past is not replayed into it.
     for (const n of this.names) if (!Number.isInteger(this.state.cursors[n])) this.state.cursors[n] = this.state.transcript.length;
@@ -100,6 +102,8 @@ class Room extends EventEmitter {
   // Work the human had stopped stays stopped. The task shows as paused, so Resume is the visible way on; nothing
   // starts on its own and consumed allowances stay consumed.
   _reconcile() {
+    // A card still waiting when the room closed belongs to a process that is gone: it can never be answered.
+    for (const e of this.state.transcript) if (e.kind === 'approval' && e.approval && e.approval.status === 'pending') e.approval.status = 'expired';
     const inflight = this.state.inflight || {}; this.state.inflight = {};
     for (const [name, f] of Object.entries(inflight)) {
       if (!this.agents[name] || !f || !(f.run > this.cancelledThrough)) continue;
@@ -126,10 +130,12 @@ class Room extends EventEmitter {
 
   _live(run) { return run > this.cancelledThrough; }
 
-  _append(from, text, extra = {}) {
+  // quiet: saved soon rather than at once (the host debounces 'dirty'); for records like approval cards, which can
+  // come many per turn and never change what a reload must recover.
+  _append(from, text, extra = {}, quiet = false) {
     const entry = { id: ++this.state.seq, from, text, ts: Date.now(), ...extra };
     this.state.transcript.push(entry);
-    this.emit('message', entry); this.emit('changed', this.state);
+    this.emit('message', entry); this.emit(quiet ? 'dirty' : 'changed', this.state);
     return entry;
   }
 
@@ -192,13 +198,14 @@ class Room extends EventEmitter {
   }
 
   _fresh(name) {
-    return this.state.transcript.slice(this.state.cursors[name]).filter((e) => mayRead(e, name) && e.from !== name && !knows(e, name) && e.kind !== 'error');
+    return this.state.transcript.slice(this.state.cursors[name]).filter((e) => mayRead(e, name) && e.from !== name && !knows(e, name) && e.kind !== 'error' && e.kind !== 'approval');
   }
 
   // Move the cursor past everything this agent has seen, its own words and errors.
   _advance(name) {
     const tr = this.state.transcript; let c = this.state.cursors[name];
-    while (c < tr.length && (!mayRead(tr[c], name) || tr[c].from === name || knows(tr[c], name) || tr[c].kind === 'error')) c++;
+    // Approval cards are the human's record, never delivered: their titles carry agent-written text (a command line).
+    while (c < tr.length && (!mayRead(tr[c], name) || tr[c].from === name || knows(tr[c], name) || tr[c].kind === 'error' || tr[c].kind === 'approval')) c++;
     this.state.cursors[name] = c;
   }
 
@@ -275,6 +282,7 @@ class Room extends EventEmitter {
       if (tt) this.tasks.addUsage(tt.id, name, this.agents[name].lastTurnUsage || null);
       // Clear the in-flight record BEFORE the save that ends the turn, so a finished turn is never saved as cut off.
       if (this.state.inflight) delete this.state.inflight[name];
+      this.denyApprovals('its turn ended', name);
       if (tt) this._taskChanged(); else this.emit('changed', this.state);
       this.busy[name] = false; this.emit('status', { name, busy: false }); this.emit('draft', { name, text: null });
       const next = this.pending[name]; this.pending[name] = 0;
@@ -304,6 +312,7 @@ class Room extends EventEmitter {
     this.busy[name] = true; this.posting.add(name); this.emit('status', { name, busy: true, since: Date.now() });
     const steps = [], started = Date.now();
     const end = () => {
+      this.denyApprovals('its turn ended', name);
       const tt = ctx.taskId && this.tasks.get(ctx.taskId);
       if (tt) this.tasks.addUsage(tt.id, name, this.agents[name].lastTurnUsage || null);
       if (tt) this._taskChanged(); else this.emit('changed', this.state);
@@ -330,6 +339,68 @@ class Room extends EventEmitter {
       reject: (e) => { if (!e || !e.stopped) this._append('system', `${L}'s report failed: ${e ? e.message : 'unknown error'}`, { kind: 'error' }); end(); }
     };
   }
+
+  // ---------- approvals ----------
+  // An agent above read only asks before each edit (and, at the "run" level, each command). The card is a transcript
+  // entry (kind 'approval') that only the human answers (answerApproval, from the page); agents can't. Stop, a used-up
+  // time allowance, the card's own timeout and closing the room all deny. "Allow edits for this task" is a standing
+  // rule for that agent's edits until the task (or, outside a task, the human's message) changes, or Stop.
+  // req: { kind: 'edit'|'command', title, paths, command, detail, reason, refused, sensitive }. refused: the host's
+  // reason to refuse without a card (outside the folder, git's own folder, unknown files). sensitive: why this file
+  // needs a card even under "Allow edits for this task". Resolves { allow, why }.
+  _approvalScope() { const t = this.tasks.active(); return t ? `task:${t.id}:${t.generation}` : `run:${this.run}`; }
+
+  requestApproval(name, req = {}) {
+    const L = this.labels[name] || name, kind = req.kind === 'command' ? 'command' : 'edit';
+    // What the card keeps: the change itself up to DETAIL_MAX characters (it says when it was cut), so a long run of
+    // edits doesn't grow the saved room without bound.
+    const detail = req.detail ? String(req.detail) : null;
+    const card = { seat: name, kind, title: String(req.title || '').slice(0, 300), paths: (req.paths || []).slice(0, 20).map((p) => String(p).slice(0, 500)),
+      command: req.command ? String(req.command).slice(0, 2000) : null, detail: detail ? detail.slice(0, DETAIL_MAX) : null, ...(detail && detail.length > DETAIL_MAX ? { detailCut: detail.length } : {}),
+      reason: req.reason ? String(req.reason).slice(0, 500) : null, ...(req.sensitive ? { sensitive: String(req.sensitive).slice(0, 300) } : {}), ...(req.noRule ? { noRule: true } : {}) };
+    const record = (status, extra = {}, quiet = true) => this._append('system', card.title, { kind: 'approval', approval: { id: `a${this.state.seq + 1}`, ...card, status, ...extra } }, quiet);
+    if (!this.agents[name] || !this._live(this.run)) { record('denied', { why: 'stopped' }); return Promise.resolve({ allow: false, why: 'stopped' }); }
+    if (!this.busy[name]) { record('denied', { why: 'its turn ended' }); return Promise.resolve({ allow: false, why: 'its turn ended' }); } // asked after its turn
+    const refused = req.refused || (req.outside ? 'outside its folder' : null);
+    if (refused) { record('denied', { why: refused }); return Promise.resolve({ allow: false, why: refused }); }
+    const scope = this._approvalScope();
+    if (kind === 'edit' && !card.sensitive && !req.noRule && (this.state.allowRules || []).some((r) => r.seat === name && r.scope === scope)) {
+      record('allowed', { auto: true, detail: null, detailCut: undefined }); return Promise.resolve({ allow: true });
+    }
+    const entry = record('pending', { asked: this.now() });
+    // The whole change stays in memory while the card waits, so a cut card can still be read in full before answering.
+    return new Promise((resolve) => this.pendingApprovals.set(entry.approval.id, { entry, resolve, scope, name, kind, sensitive: !!card.sensitive || !!req.noRule, asked: this.now(), full: card.detailCut ? detail : null }));
+  }
+
+  // decision: 'allow' | 'allowTask' (edits only) | 'deny'. Only the human's page calls this.
+  answerApproval(id, decision) {
+    const p = this.pendingApprovals.get(id); if (!p) return false;
+    this.pendingApprovals.delete(id);
+    const allow = decision === 'allow' || decision === 'allowTask';
+    // The standing rule only when it can apply: an edit, not a sensitive file, still in the task it was asked in.
+    const rule = decision === 'allowTask' && p.kind === 'edit' && !p.sensitive && p.scope === this._approvalScope();
+    if (rule) this.state.allowRules = (this.state.allowRules || []).filter((r) => r.scope === p.scope).concat({ seat: p.name, scope: p.scope });
+    this._settleApproval(p, allow ? (rule ? 'allowedTask' : 'allowed') : 'denied');
+    return true;
+  }
+
+  _settleApproval(p, status, why = null) {
+    Object.assign(p.entry.approval, { status, answered: this.now(), ...(why ? { why } : {}) });
+    this.emit('approval', p.entry); this.emit('dirty', this.state);
+    p.resolve({ allow: status === 'allowed' || status === 'allowedTask', why });
+  }
+
+  // Every waiting card is denied (Stop, closing the room, a used-up allowance), or only one agent's (its turn ended:
+  // a card can't outlive the turn that asked, so a late Allow never looks like it did something).
+  denyApprovals(why, name = null) {
+    const all = [...this.pendingApprovals.entries()].filter(([, p]) => !name || p.name === name);
+    for (const [id] of all) this.pendingApprovals.delete(id);
+    for (const [, p] of all) this._settleApproval(p, 'denied', why);
+    return all.length;
+  }
+
+  // What an agent may do changed: any standing "allow edits" rule it had ends.
+  clearAllowRules(name) { this.state.allowRules = (this.state.allowRules || []).filter((r) => r.seat !== name); }
 
   // A turn that did not complete: its input (and steers accepted during it) becomes deliverable again, and the
   // requests it carried go back to open under their original ids.
@@ -401,7 +472,9 @@ class Room extends EventEmitter {
 
   // The host clock (scheduler.js): a used-up time allowance cancels running task work.
   tick() {
+    for (const [id, p] of this.pendingApprovals) if (this.now() - p.asked >= this.approvalTimeoutMs) { this.pendingApprovals.delete(id); this._settleApproval(p, 'denied', 'no answer in time'); }
     if (!this.tasks.checkTime()) return;
+    this.denyApprovals('the task used its time allowance');
     this.note(`Task ${this.tasks.active().id} used its time allowance. Running work is stopped; add time to continue, or finish with what we have.`);
     for (const n of this.names) if (this.busy[n] && this.agents[n] && this.agents[n].interrupt) this.agents[n].interrupt();
     this._taskChanged();
@@ -427,6 +500,7 @@ class Room extends EventEmitter {
     this.emit('stop'); // native session changes obey the same Stop boundary as turns
     this.cancelledThrough = this.state.cancelledThrough = this.run; this.pending = this._each(0); this.held.clear();
     const held = (this.state.heldPosts || []).splice(0).length;
+    this.denyApprovals('stopped'); this.state.allowRules = [];
     if (this.tasks.stop()) this._taskChanged();
     if (held) this.note(`${held} held report${held === 1 ? '' : 's'} from background jobs discarded.`);
     for (const n of this.names) if (this.busy[n] && this.agents[n] && this.agents[n].interrupt) this.agents[n].interrupt();

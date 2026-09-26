@@ -26,6 +26,7 @@ class Element {
   focus() {} scrollIntoView() {}
   setSelectionRange(a) { this.selectionStart = a; }
   remove() { this.parent.children = this.parent.children.filter(e => e !== this); }
+  replaceWith(e) { const i = this.parent.children.indexOf(this); e.parent = this.parent; this.parent.children[i] = e; }
 }
 function walk(e) { return e.children.flatMap(c => [c, ...walk(c)]); }
 // Loads the webview with a three-seat fixture room. Returns the elements by id, the messages the page posted,

@@ -3,7 +3,7 @@
   const vscode = acquireVsCodeApi();
   // The extension host keeps its code until the window reloads, but this script and the stylesheet load fresh.
   // If the page was built by a different version, say so instead of rendering a broken layout.
-  const EXPECT = '0.7.0';
+  const EXPECT = '0.8.0';
   if (document.body.dataset.wc !== EXPECT) {
     document.body.textContent = '';
     const box = document.createElement('div');
@@ -20,7 +20,8 @@
   const participantUsage = {}, participantCost = {};
   let busy = {}, local = null, quota = null, cusage = null, meta = {}, specs = [], controls = null, ideSummary = null;
   let pending = [];                                  // attachments waiting to be sent
-  const drafts = {}, act = {}, since = {}, jobs = {};           // in-progress replies per agent
+  const drafts = {}, act = {}, since = {}, jobs = {};
+  const cards = {}, asking = {};                     // approval cards by id; agents waiting on one           // in-progress replies per agent
   const menu = { items: [], sel: 0, open: false };
   let ticker = null;
   let task = null, taskMode = 'auto', taskDefaults = null, presets = {}, typedAgents = {};
@@ -126,8 +127,57 @@
     return `${d.toLocaleDateString([], { month: 'short', day: 'numeric', ...(d.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }) })}, ${t}`;
   }
   const fullTime = (ts) => (ts ? new Date(ts).toLocaleString([], { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }) : '');
+  // An agent asking to edit or run something. Only you answer it; Stop, closing the room or no answer denies it.
+  const CARD_STATUS = { allowed: 'Allowed', allowedTask: 'Allowed, with its other edits for this task', denied: 'Denied', expired: 'Not answered: the room closed' };
+  function approvalCard(entry) {
+    const a = entry.approval, row = el('div', `row approval ${a.status}`); row.dataset.approval = a.id;
+    const head = el('div', 'aphead');
+    const asks = a.status === 'pending' ? 'wants to' : 'asked to';
+    head.appendChild(el('span', 'apwho', `${NAMES[a.seat] || a.seat} ${asks} ${a.kind === 'command' ? 'run a command' : 'edit'}`));
+    if (entry.ts) { const s = el('span', 'ts', stamp(entry.ts)); s.title = fullTime(entry.ts); head.appendChild(s); }
+    row.appendChild(head);
+    row.appendChild(el('div', 'aptitle', a.title));
+    if (a.reason) row.appendChild(el('div', 'apreason', a.reason));
+    if (a.sensitive) row.appendChild(el('div', 'apwarn', `Look closely: ${a.sensitive}. This kind of file always asks, even when you've allowed the task's other edits.`));
+    if (a.detail) {
+      const d = el('details', 'fold'); d.open = a.status === 'pending'; d.appendChild(el('summary', null, a.kind === 'command' ? 'Command' : 'Changes')); d.appendChild(el('pre', 'apdetail', a.detail));
+      if (a.detailCut) {
+        d.appendChild(el('small', 'note', `Showing the first ${a.detail.length.toLocaleString()} of ${Number(a.detailCut).toLocaleString()} characters.`));
+        if (a.status === 'pending') { const full = el('button', 'link', 'Show the full change'); full.title = 'Opens the whole change in an editor tab, so you can read all of it before you answer.'; full.addEventListener('click', () => vscode.postMessage({ type: 'approvalFull', id: a.id })); d.appendChild(full); }
+      }
+      row.appendChild(d);
+    }
+    else if (a.command) row.appendChild(el('pre', 'apdetail', a.command));
+    if (a.status === 'pending') {
+      const bar = el('div', 'apbar');
+      const choose = (label, decision, cls, tip) => { const b = el('button', `tbtn ${cls}`, label); b.title = tip; b.addEventListener('click', () => { for (const x of bar.children) x.disabled = true; vscode.postMessage({ type: 'approval', id: a.id, decision }); }); bar.appendChild(b); };
+      choose('Allow', 'allow', 'primary', a.kind === 'command' ? 'Run this command once.' : 'Make this edit.');
+      if (a.kind === 'edit' && !a.sensitive && !a.noRule) choose('Allow edits for this task', 'allowTask', '', `Make this edit and ${NAMES[a.seat] || a.seat}'s other edits in its folder until the task ends or you press Stop. Commands still ask.`);
+      choose('Deny', 'deny', 'danger', `Refuse it. ${NAMES[a.seat] || a.seat} is told not to try another way.`);
+      row.appendChild(bar);
+    } else row.appendChild(el('div', 'apstatus', a.auto ? 'Allowed: you allowed its edits for this task' : `${CARD_STATUS[a.status] || a.status}${a.why ? ` (${a.why})` : ''}`));
+    if (a.status === 'pending') asking[a.seat] = a.id; else if (asking[a.seat] === a.id) delete asking[a.seat];
+    cards[a.id] = row;
+    return row;
+  }
+  // A room whose agents work in a separate copy says so under its title, with what changed and what you can do.
+  let copyChanges = null;
+  function renderCopy() {
+    const box = $('ids'), old = box.querySelector('.copybar'); if (old) old.remove();
+    if (!meta.copy) return;
+    const n = copyChanges ? copyChanges.files.length : null, k = copyChanges ? copyChanges.commits : 0;
+    const bar = el('div', 'copybar');
+    bar.appendChild(el('span', 'copywhat', `Working in a separate copy · branch ${meta.copy.branch}${n == null ? '' : ` · ${n} changed file${n === 1 ? '' : 's'}${k ? `, ${k} commit${k === 1 ? '' : 's'}` : ''}`}`));
+    bar.title = `Your folder (${meta.copy.repo}) is untouched. The copy is at ${meta.copy.dir}.`;
+    const go = (label, action, tip) => { const b = el('button', 'link', label); b.title = tip; b.addEventListener('click', () => vscode.postMessage({ type: 'copy', action })); bar.appendChild(b); };
+    go('Open the copy', 'open', 'Opens the copy in a new VS Code window, where Source Control shows every change.');
+    go('Bring changes into your folder', 'bringIn', 'Copies a command that commits the changes on the copy\'s branch and merges them into your folder. You run it.');
+    go('Remove the copy', 'remove', 'Copies a command that deletes the copy and its branch. Run it after bringing in what you want to keep.');
+    box.appendChild(bar);
+  }
   function render(entry) {
     const time = stamp(entry.ts);
+    if (entry.kind === 'approval' && entry.approval) return approvalCard(entry);
     if (entry.from === 'system') {
       const row = el('div', `row system${entry.kind ? ' kind-' + entry.kind : ''}`); row.appendChild(el('div', 'text', entry.text));
       if (entry.ts) { const s = el('span', 'ts', time); s.title = fullTime(entry.ts); row.appendChild(s); }
@@ -208,7 +258,7 @@
   function renderWho() {
     const w = $('who'); w.textContent = '';
     for (const n of Object.keys(busy)) if (busy[n]) {
-      w.appendChild(el('span', `w ${provider(n)}`, `${NAMES[n]} · ${act[n] ? act[n].label : 'starting'} · ${secs(Date.now() - (since[n] || Date.now()))}`));
+      w.appendChild(el('span', `w ${provider(n)}`, `${NAMES[n]} · ${asking[n] ? 'waiting for you to allow or deny' : act[n] ? act[n].label : 'starting'} · ${secs(Date.now() - (since[n] || Date.now()))}`));
     }
     // Background jobs keep running after a reply ends; their agent reports back in the room when they finish.
     for (const n of Object.keys(jobs)) if (!busy[n] && jobs[n].length) {
@@ -232,6 +282,7 @@
       btn.appendChild(el('span', 'seatlabel', NAMES[name]));
       if (v) btn.appendChild(el('span', 'seatmodel', `${modelTag(name) || 'Default'} · ${v.effort ? effortName(provider(name), v.effort) : 'Default'}`));
       if (v && v.fast) btn.appendChild(el('span', 'bolt', '⚡'));
+      if (v && v.access && v.access !== 'read') { const x = el('span', 'access', v.access === 'run' ? 'can edit + run' : 'can edit'); x.title = 'Every edit' + (v.access === 'run' ? ' and command' : '') + ' asks you first.'; btn.appendChild(x); }
       btn.title = `${NAMES[name]} (@${name}): click for its settings: model, thinking, and which conversation it's on${p.cwd ? '\n' + p.cwd : ''}`;
       btn.setAttribute('aria-label', `${NAMES[name]} controls`);
       btn.addEventListener('click', () => openPop(name)); box.appendChild(btn);
@@ -524,6 +575,16 @@
     sw.disabled = !fastOk && !c.fast;
     sw.addEventListener('click', () => { cmd(`/${name} fast ${c.fast ? 'off' : 'on'}`); closePop(); });
     row.appendChild(txt); row.appendChild(sw); pop.appendChild(row);
+    // What it may do. One agent per room above read only; raising it asks first.
+    const perm = el('div'); perm.appendChild(el('div', 'lbl', 'What it can do'));
+    const pseg = el('div', 'seg');
+    for (const [v, text, tip] of [['read', 'Read only', 'It can read and search files. It can\'t change anything.'], ['edit', 'Edit files', 'It can edit files in its folder. Every edit asks you first.'], ['run', 'Edit + run commands', 'It can edit files and run commands. Every edit and command asks you first.']]) {
+      const b = el('button', v === (c.access || 'read') ? 'on' : '', text); b.title = tip; b.disabled = v !== 'read' && !!c.editorElsewhere;
+      b.addEventListener('click', () => { cmd(`/${name} access ${v}`); closePop(); }); pseg.appendChild(b);
+    }
+    perm.appendChild(pseg);
+    if (c.editorElsewhere) perm.appendChild(el('small', 'note', 'Only one agent in a room can edit files, and another one already can.'));
+    pop.appendChild(perm);
     // Which conversation this agent is on, in words, with a way to find it again in Claude Code or Codex.
     const ws = el('div', 'conv'); ws.appendChild(el('div', 'lbl', 'Conversation'));
     const src = c.source, app = kind === 'claude' ? 'Claude Code' : 'Codex', short = (x) => String(x).slice(0, 8);
@@ -568,9 +629,12 @@
       ar.appendChild(at); ar.appendChild(as); pop.appendChild(ar);
     }
     // What this agent can do here: one line, full detail on hover.
-    const cap = el('small', 'note cap', kind === 'claude' ? 'Can read files. Can\'t edit them, run commands or use the web.' : 'Can read files and run look-only commands. Can\'t edit files, use the web or connectors.');
-    cap.title = kind === 'claude' ? 'Read, Glob and Grep inside the room folder, plus the room tools (ask the other agent, read shared history, finish a task). No edits, no shell, no web, no other MCP servers. Your own Claude settings do not apply here.'
-      : 'Read-only sandbox for local inspection, plus the room tools when its thread has them. Read access is not confined to the room folder. Every approval request is declined. Web search, connected apps and external MCP tools are disabled and checked before the thread is used.';
+    const lvl = c.access || 'read';
+    const cap = el('small', 'note cap', kind === 'claude'
+      ? (lvl === 'read' ? 'Can read files. Can\'t edit them, run commands or use the web.' : lvl === 'edit' ? 'Can read files, and edit them after you allow it. Can\'t run commands or use the web.' : 'Can read files, and edit them or run commands after you allow it. Can\'t use the web.')
+      : (lvl === 'read' ? 'Can read files and run look-only commands. Can\'t edit files, use the web or connectors.' : lvl === 'edit' ? 'Can read files and run look-only commands, and edit files after you allow it. Can\'t use the web or connectors.' : 'Can read files, and edit files or run commands after you allow it; an allowed command runs outside its sandbox.'));
+    cap.title = kind === 'claude' ? `Read, Glob and Grep inside the room folder, plus the room tools (ask the other agent, read shared history, finish a task).${lvl === 'read' ? ' No edits, no shell' : lvl === 'edit' ? ' Edit, Write and NotebookEdit ask you first, one card each; no shell' : ' Edit, Write, NotebookEdit and Bash ask you first, one card each'}. No web, no other MCP servers. Your own Claude settings do not apply here.`
+      : `Read-only sandbox for local inspection, plus the room tools when its thread has them. Read access is not confined to the room folder. ${lvl === 'read' ? 'Every approval request is declined.' : lvl === 'edit' ? 'Each file change asks you first; commands that need more than the sandbox are declined.' : 'Each file change, and each command that needs more than the sandbox, asks you first.'} Web search, connected apps and external MCP tools are disabled and checked before the thread is used.`;
     pop.appendChild(cap);
     const save = el('button', 'link', 'Use these settings for new rooms');
     save.addEventListener('click', () => { vscode.postMessage({ type: 'saveDefaults', vendor: name }); closePop(); });
@@ -594,7 +658,8 @@
       meta = m.meta || {}; syncParticipants();
       specs = m.commands || specs; controls = m.controls || controls;
       $('title').textContent = meta.name || 'Wagon Wheel';
-      $('ids').textContent = [meta.cwd, meta.forkedFrom && `codex fork of ${meta.forkedFrom.slice(0, 8)}`, meta.claudeForkedFrom && `claude fork of ${meta.claudeForkedFrom.slice(0, 8)}`].filter(Boolean).join(' · ');
+      $('ids').textContent = [meta.copy ? null : meta.cwd, meta.forkedFrom && `codex fork of ${meta.forkedFrom.slice(0, 8)}`, meta.claudeForkedFrom && `claude fork of ${meta.claudeForkedFrom.slice(0, 8)}`].filter(Boolean).join(' · ');
+      copyChanges = null; renderCopy(); if (meta.copy) vscode.postMessage({ type: 'copy', action: 'refresh' });
       (m.transcript || []).forEach((e) => add(render(e)));
       busy = m.busy || {}; if (m.quota) quota = m.quota;
       for (const id of Object.keys(participantUsage)) delete participantUsage[id];
@@ -605,9 +670,16 @@
       renderQuota(); renderChips(); renderWho(); renderTask(); log.scrollTop = log.scrollHeight;
     } else if (m.type === 'message') { setDraft(m.entry.from, null); add(render(m.entry)); }
     else if (m.type === 'jobs') { jobs[m.name] = m.jobs || []; renderWho(); }
+    else if (m.type === 'approval' && m.entry && m.entry.approval) {
+      const old = cards[m.entry.approval.id], fresh = approvalCard(m.entry);
+      if (old) old.replaceWith(fresh);
+      renderWho();
+    }
+    else if (m.type === 'copyChanges' && m.changes) { copyChanges = m.changes; renderCopy(); }
     else if (m.type === 'draft') setDraft(m.name, m.text);
     else if (m.type === 'activity') setActivity(m);
     else if (m.type === 'status') {
+      if (busy[m.name] && !m.busy && meta.copy && controls && controls[m.name] && controls[m.name].access && controls[m.name].access !== 'read') vscode.postMessage({ type: 'copy', action: 'refresh' }); // the editor's turn ended: count again
       busy[m.name] = m.busy;
       if (m.busy) since[m.name] = m.since || Date.now(); else { delete act[m.name]; delete since[m.name]; }
       if (m.participantUsage) participantUsage[m.name] = m.participantUsage;

@@ -208,8 +208,8 @@ test('page: plain-English choices, a copy recommended by default, and the form i
   pg.click('How to sign in'); assert.deepStrictEqual(pg.sent.at(-1), { type: 'guide', provider: 'codex' });
   pg.click('Start room');
   assert.deepStrictEqual(pg.sent.at(-1), { type: 'start', form: { name: 'Room 9/25/2026', agents: [
-    { provider: 'claude', label: 'Claude', model: null, effort: null, start: 'copy', conversation: 'cl-1', folder: '/w', share: false },
-    { provider: 'codex', label: 'Codex', model: null, effort: null, start: 'fresh', conversation: null, folder: '/w', share: false }] } });
+    { provider: 'claude', label: 'Claude', model: null, effort: null, start: 'copy', conversation: 'cl-1', folder: '/w', share: false, access: 'read' },
+    { provider: 'codex', label: 'Codex', model: null, effort: null, start: 'fresh', conversation: null, folder: '/w', share: false, access: 'read' }], editIn: 'folder' } });
 });
 
 test('page: add and remove agents up to six, change a folder, and show the host\'s error', () => {
@@ -456,4 +456,36 @@ test('host: when Claude Code\'s own menu arrives late, the screen gets it on top
   const last = p.sent.filter((m) => m.type === 'lists').at(-1);
   assert.deepStrictEqual(last.models.claude.map((m) => m.note), ['from the CLI']);
   assert.deepStrictEqual(last.conversations.codex.map((c) => c.title), ['Newer list']);
+});
+
+test('page: one agent can be allowed to edit; where its edits go is asked, and the form carries both', () => {
+  const pg = loadPage();
+  pg.receive({ type: 'init', existing: false, defaults: { name: 'R', folder: '/w', folderLabel: '~/w' }, trusted: true });
+  pg.receive(pageLists);
+  assert.ok(!pg.text().includes('Where edits go'));
+  const selects = () => walk(pg.app).filter((e) => e.tagName === 'select' && e.attrs['aria-label'] === 'What it can do');
+  const codex = selects()[1]; codex.value = 'edit'; codex.fire('change');
+  const t = pg.text();
+  assert.ok(t.includes('Where edits go') && t.includes('Your folder') && t.includes('A separate copy'));
+  assert.ok(t.includes('Only one agent in a room can edit files, and Codex already can.'));
+  assert.ok(selects()[0].children.filter((o) => o.value !== 'read').every((o) => o.disabled), 'the other agent can only read');
+  pg.click('A separate copy');
+  assert.ok(pg.text().includes('starts from your last commit'));
+  assert.ok(pg.text().includes('Codex can edit files in a separate copy, asking you first each time.'));
+  pg.click('Start room');
+  const form = pg.sent.at(-1).form;
+  assert.deepStrictEqual([form.agents.map((a) => a.access), form.editIn], [['read', 'edit'], 'copy']);
+});
+
+test('plan: levels are validated; one editor; Ultracode and originals are refused where they can\'t work', () => {
+  const dir = fs.realpathSync(os.tmpdir());
+  const base = { lists: { claude: [{ id: 'c1', cwd: dir }], codex: [] }, codexModels: [], defaultCwd: dir, claudeModels: [{ id: 'default', efforts: ['high', 'xhigh', 'ultracode'] }] };
+  const ag = (x) => ({ provider: 'claude', label: 'C', start: 'fresh', ...x });
+  const plan = startRoom.buildPlan({ name: 'r', agents: [ag({ access: 'edit' }), ag({ label: 'D' })], editIn: 'copy' }, base);
+  assert.deepStrictEqual([plan.seats.map((x) => x.access), plan.editIn], [['edit', 'read'], 'copy']);
+  assert.strictEqual(startRoom.buildPlan({ name: 'r', agents: [ag({})], editIn: 'copy' }, base).editIn, 'folder', 'no editor, no copy');
+  assert.throws(() => startRoom.buildPlan({ name: 'r', agents: [ag({ access: 'edit' }), ag({ label: 'D', access: 'run' })] }, base), /Only one agent in a room can edit/);
+  assert.throws(() => startRoom.buildPlan({ name: 'r', agents: [ag({ access: 'root' })] }, base), /choose what it can do/);
+  assert.throws(() => startRoom.buildPlan({ name: 'r', agents: [ag({ access: 'edit', effort: 'ultracode' })] }, base), /Ultracode is for agents that can only read/);
+  assert.throws(() => startRoom.buildPlan({ name: 'r', agents: [ag({ access: 'edit' }), ag({ label: 'D', start: 'original', conversation: 'c1' })], editIn: 'copy' }, base), /copies of your conversations/);
 });

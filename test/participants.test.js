@@ -25,9 +25,9 @@ test('legacy settings migrate without mutating saved room metadata', () => {
   const participants = normalizeParticipants(meta, settings);
   assert.deepEqual(participants, [
     { id: 'claude', label: 'Claude', provider: 'claude', cwd, sessionId: 'c1', model: null,
-      effort: 'high', fast: true, typed: true, forkFrom: 'c0' },
+      effort: 'high', fast: true, typed: true, forkFrom: 'c0', access: 'read' },
     { id: 'codex', label: 'Codex', provider: 'codex', cwd, sessionId: 'x1', model: 'saved-model',
-      effort: 'low', fast: false, typed: true, typedThreads: ['x1'], forkFrom: 'x0' }
+      effort: 'low', fast: false, typed: true, typedThreads: ['x1'], forkFrom: 'x0', access: 'read' }
   ]);
   participants[1].typedThreads.push('x2');
   assert.deepEqual(meta, before);
@@ -140,4 +140,11 @@ test('SessionClaims.isClaimed reports ownership without taking it', () => {
   c.claim('codex', 'th-1', owner);
   assert.strictEqual(c.isClaimed('codex', 'th-1'), true); assert.strictEqual(c.isClaimed('claude', 'th-1'), false);
   assert.strictEqual(c.claim('codex', 'th-1', owner), true, 'the owner still owns it');
+});
+
+test('permission levels: read only by default, validated, and at most one agent above read only', () => {
+  const seat = (id, provider, access) => ({ id, label: id, provider, cwd, ...(access === undefined ? {} : { access }) });
+  assert.deepEqual(normalizeParticipants({ seats: [seat('a', 'claude'), seat('b', 'codex', 'run')] }).map((p) => p.access), ['read', 'run']);
+  assert.throws(() => normalizeParticipants({ seats: [seat('a', 'claude', 'admin')] }), /permission level/);
+  assert.throws(() => normalizeParticipants({ seats: [seat('a', 'claude', 'edit'), seat('b', 'codex', 'edit')] }), /Only one agent in a room can edit/);
 });

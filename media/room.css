@@ -251,3 +251,19 @@ body.dropping .composer { box-shadow: 0 0 0 3px var(--focus); }
 .pop .findrow { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 2px; }
 .pop .findrow .link { color: var(--vscode-textLink-foreground); text-decoration: underline; text-underline-offset: 2px; padding: 0; font-size: .9em; }
 .pop .findrow .link:disabled { color: var(--muted); text-decoration: none; }
+
+/* Approval cards: an agent asking to edit or run something. */
+.row.approval { border: 1px solid var(--line); border-left: 3px solid var(--vscode-editorWarning-foreground, #cca700); border-radius: 10px; padding: 8px 12px; margin: 6px 0; background: var(--bubble); display: grid; gap: 4px; }
+.row.approval.allowed, .row.approval.allowedTask { border-left-color: var(--vscode-testing-iconPassed, #3fb950); }
+.row.approval.denied, .row.approval.expired { border-left-color: var(--vscode-editorError-foreground, #f14c4c); opacity: .85; }
+.row.approval .aphead { display: flex; justify-content: space-between; gap: 8px; font-size: .86em; color: var(--muted); }
+.row.approval .aptitle { font-weight: 600; overflow-wrap: anywhere; }
+.row.approval .apwarn { font-size: .88em; color: var(--vscode-editorWarning-foreground, #cca700); }
+.row.approval .apreason, .row.approval .apstatus { font-size: .88em; color: var(--muted); }
+.row.approval pre.apdetail { max-height: 280px; overflow: auto; margin: 4px 0 0; padding: 6px 8px; border-radius: 6px; background: var(--vscode-textCodeBlock-background, rgba(127,127,127,.12)); font-size: .85em; white-space: pre; }
+.row.approval .apbar { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.tbtn.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; }
+.tbtn.danger { color: var(--vscode-editorError-foreground, #f14c4c); }
+.copybar { font-family: var(--vscode-font-family); font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; margin-top: 2px; }
+.copybar .copywhat { color: var(--muted); }
+.chip .access { font-size: .78em; padding: 0 5px; border-radius: 6px; border: 1px solid var(--line); margin-left: 4px; }

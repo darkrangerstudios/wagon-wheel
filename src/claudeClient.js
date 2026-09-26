@@ -20,6 +20,9 @@ function describeTool(name, input = {}) {
   if (name === 'Grep') return `searching for "${clip(input.pattern, 40)}"`;
   if (name === 'Glob') return `listing ${clip(input.pattern, 40)}`;
   if (name === 'Workflow') return 'starting a background workflow';
+  if (name === 'Edit' || name === 'NotebookEdit') return `editing ${base(input.file_path || input.notebook_path)}`;
+  if (name === 'Write') return `writing ${base(input.file_path)}`;
+  if (name === 'Bash') return `running ${clip(input.command, 50)}`;
   return `using ${name}`;
 }
 
@@ -30,6 +33,7 @@ function describeTool(name, input = {}) {
 // `git worktree add` in the person's repo, which no tool permission covers) is refused by a WorktreeCreate hook
 // that fails, so such an agent is not started. See test/live-ultracode-boundary.js.
 const { ULTRACODE } = require('./claudeModels');
+const EDIT_TOOLS = ['Edit', 'Write', 'NotebookEdit'];
 const ULTRA_DENY = ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Agent', 'Task'];
 const NO_WORKTREES = { WorktreeCreate: [{ hooks: [{ type: 'command', command: 'echo "Wagon Wheel rooms are read-only: workflow agents cannot use worktrees" >&2; exit 1' }] }] };
 
@@ -38,8 +42,11 @@ class ClaudeClient {
   // onUnprompted({ jobs }): Claude started a turn nobody sent, after a background job finished. Return reply
   // handlers ({ onDelta, onActivity, onTool, resolve, reject }) to take it, or null to stop that turn.
   // onJobs(jobs): the background jobs running now, [{ id, description }].
-  constructor({ exe, cwd, model, effort = null, fast = false, systemPrompt, sessionId = null, forkFrom = null, addDirs = [], tools = [], log = () => {}, onNotice = () => {}, onSession = () => {}, onUnprompted = () => null, onJobs = () => {} }) {
-    Object.assign(this, { exe, cwd, model, effort, fast, systemPrompt, sessionId, forkFrom, addDirs, tools, log, onNotice, onSession, onUnprompted, onJobs });
+  // access: 'read' (default) | 'edit' | 'run'. Above read only, Claude Code asks before each edit or shell command
+  // (--permission-prompt-tool stdio: a can_use_tool control request); onPermission({ tool, input, description,
+  // blockedPath }) answers it with { allow, why }. With no handler, or no reply open, the answer is no.
+  constructor({ exe, cwd, model, effort = null, fast = false, systemPrompt, sessionId = null, forkFrom = null, addDirs = [], tools = [], log = () => {}, onNotice = () => {}, onSession = () => {}, onUnprompted = () => null, onJobs = () => {}, access = 'read', onPermission = null }) {
+    Object.assign(this, { exe, cwd, model, effort, fast, systemPrompt, sessionId, forkFrom, addDirs, tools, log, onNotice, onSession, onUnprompted, onJobs, access, onPermission });
     this.typed = tools.length > 0;
     this.proc = null; this.waiter = null; this.totalCostUsd = 0; this.steerQueue = []; this.reqId = 0;
     this.jobs = []; this.finished = [];
@@ -50,13 +57,17 @@ class ClaudeClient {
     // settings files (their allow rules once let the room's Claude run shell commands) and confines file tools to
     // the working directories; --tools limits the built-in set to reading. --allowedTools then lets the read
     // tools and our own room tools run without prompting, and dontAsk refuses everything else.
-    const ultra = this.effort === ULTRACODE, builtIn = ultra ? READ_ONLY_TOOLS.concat('Workflow') : READ_ONLY_TOOLS;
+    // Above read only, the write tools (and Bash at "run") are added but NOT allowed: each use asks the room. Ultracode
+    // is read-only only (a workflow's agents can't show a card), so an editing agent never gets the Workflow tool.
+    const writes = this.access === 'edit' ? EDIT_TOOLS : this.access === 'run' ? EDIT_TOOLS.concat('Bash') : [];
+    const ultra = this.effort === ULTRACODE && !writes.length, builtIn = ultra ? READ_ONLY_TOOLS.concat('Workflow') : READ_ONLY_TOOLS;
     const a = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
-      '--include-partial-messages', '--restricted', '--tools', builtIn.join(','),
-      '--permission-mode', 'dontAsk', '--allowedTools', builtIn.concat(this.tools.map((t) => `mcp__${SERVER}__${t.name}`)).join(','),
+      '--include-partial-messages', '--restricted', '--tools', builtIn.concat(writes).join(','),
+      '--permission-mode', writes.length ? 'default' : 'dontAsk', ...(writes.length ? ['--permission-prompt-tool', 'stdio'] : []),
+      '--allowedTools', builtIn.concat(this.tools.map((t) => `mcp__${SERVER}__${t.name}`)).join(','),
       '--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: this.typed ? { [SERVER]: { type: 'sdk', name: SERVER } } : {} }), '--append-system-prompt', this.systemPrompt];
     if (this.model && this.model !== 'default') a.push('--model', this.model); // Default (recommended): the CLI's own choice
-    if (this.effort) a.push('--effort', ultra ? 'xhigh' : this.effort);
+    if (this.effort) a.push('--effort', this.effort === ULTRACODE ? 'xhigh' : this.effort);
     const settings = { ...(this.fast ? { fastMode: true } : {}), ...(ultra ? { ultracode: true, hooks: NO_WORKTREES } : {}) }; // fast mode: Opus, billed to usage credits
     if (Object.keys(settings).length) a.push('--settings', JSON.stringify(settings));
     if (ultra) a.push('--disallowedTools', ULTRA_DENY.join(','));
@@ -100,6 +111,21 @@ class ClaudeClient {
     this._write({ type: 'control_response', response: { subtype: 'success', request_id: m.request_id, response: { mcp_response: resp } } });
   }
 
+  // Claude Code asking to use a write tool. Answered by the room (onPermission); anything unexpected is a no.
+  async _onPermission(m) {
+    const proc = this.proc, r = m.request || {}, w = this.waiter;
+    let ans = { allow: false, why: 'not available' };
+    const known = this.access !== 'read' && (EDIT_TOOLS.includes(r.tool_name) || (r.tool_name === 'Bash' && this.access === 'run'));
+    if (known && w && !w.unprompted && this.onPermission) { // a post an agent makes on its own never edits
+      try { ans = await this.onPermission({ tool: r.tool_name, input: r.input || {}, description: typeof r.description === 'string' ? r.description : '', blockedPath: typeof r.blocked_path === 'string' ? r.blocked_path : null }); }
+      catch (e) { ans = { allow: false, why: e.message }; }
+      if (this.waiter !== w) ans = { allow: false, why: 'that reply already ended' }; // Stopped while the card was open
+    }
+    if (this.proc !== proc) return;
+    const response = ans.allow ? { behavior: 'allow', updatedInput: r.input || {} } : { behavior: 'deny', message: `Denied by ${ans.who || 'the person running this room'}${ans.why ? ` (${ans.why})` : ''}. Don't retry it another way; say what you wanted to change and why.` };
+    this._write({ type: 'control_response', response: { subtype: 'success', request_id: m.request_id, response } });
+  }
+
   // Every way a turn ends (result, exit, kill fallback, spawn error) clears its Stop and steer state, so none
   // of it leaks into the next reply. A Stop that ends in an error, even a forced kill, is still a Stop.
   _settle(err, text) {
@@ -119,6 +145,7 @@ class ClaudeClient {
     if (m.session_id && !this.sessionId) { this.sessionId = m.session_id; this.forkFrom = null; this.onSession(this.sessionId); } // the host claims it at once
     if (m.type === 'system' && m.subtype === 'notification' && m.text) this.onNotice(m.text); // e.g. fast mode out of credits
     if (m.type === 'control_request' && m.request && m.request.subtype === 'mcp_message' && m.request.server_name === SERVER) { this._onMcp(m); return; }
+    if (m.type === 'control_request' && m.request && m.request.subtype === 'can_use_tool') { this._onPermission(m); return; }
     if (m.type === 'system' && m.subtype === 'background_tasks_changed' && Array.isArray(m.tasks)) {
       this.jobs = m.tasks.filter((t) => t && typeof t.task_id === 'string').map((t) => ({ id: t.task_id, description: clip(t.description, 120) }));
       this.onJobs(this.jobs);
@@ -209,7 +236,8 @@ class ClaudeClient {
   }
 
   // Model and effort are launch flags: restart on the same session (now, or after the current reply).
-  setOptions({ model, effort, fast }) {
+  setOptions({ model, effort, fast, access }) {
+    if (access !== undefined) this.access = access;
     if (model !== undefined) this.model = model;
     if (effort !== undefined) this.effort = effort;
     if (fast !== undefined) this.fast = fast;
@@ -248,4 +276,4 @@ class ClaudeClient {
   stop() { this._dropJobs(); if (this.proc) { this.proc.stdin.end(); this.proc.kill(); this.proc = null; } }
 }
 
-module.exports = { ClaudeClient, READ_ONLY_TOOLS, ULTRA_DENY, describeTool };
+module.exports = { ClaudeClient, READ_ONLY_TOOLS, EDIT_TOOLS, ULTRA_DENY, describeTool };

@@ -6,4 +6,4 @@ While they work, you can add a thought, change direction, **Pause** or **Stop**.
 
 Every agent turn is a real request to Claude or Codex and uses your plan, so each piece of work has a limit on turns and minutes. You can change it from **Controls**.
 
-Agents can read files in their folder. They can't edit files or change anything on your computer.
+Agents can read files in their folder. You can let one of them edit too, and every edit asks you first, as a card in the room.

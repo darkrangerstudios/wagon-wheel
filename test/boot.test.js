@@ -260,3 +260,45 @@ test('reopening a room: a resumed Codex thread counts as saved (its conversation
     { transcript: [], cursors: { claude: 0, codex: 0 }, lastTargets: ['claude'], seq: 0 });
   try { await s.boot(); assert.strictEqual(s.ownConversation('codex'), 'th-resumed-1'); } finally { s.dispose(); }
 });
+
+test('editing agents: the room asks you, refuses paths outside the folder, keeps one editor, and closing denies', async () => {
+  const dir = fs.realpathSync(os.tmpdir());
+  const meta = { ...newMeta('edits'), seats: [{ id: 'claude', label: 'Claude', provider: 'claude', cwd: dir, access: 'edit' }, { id: 'codex', label: 'Codex', provider: 'codex', cwd: dir }] };
+  const s = new RoomSession(context(), meta, null);
+  const asked = []; stubs.vscode.window.showWarningMessage = async (m, o, ...choices) => { asked.push(m); return choices[0]; };
+  try {
+    await s.boot({});
+    const claude = s.slots.claude.client, codex = s.slots.codex.client;
+    assert.strictEqual(claude.access, 'edit'); assert.strictEqual(typeof claude.onPermission, 'function');
+    assert.strictEqual(codex.o.access, 'read'); assert.strictEqual(typeof codex.o.onApproval, 'function');
+    s.room.postFromHuman('@claude go'); await new Promise((res) => setImmediate(res));
+    s.room.busy.claude = true; // mid-turn (the fake client has no send)
+    assert.strictEqual((await claude.onPermission({ tool: 'Edit', input: { file_path: '/etc/hosts', old_string: 'a', new_string: 'b' } })).allow, false, 'outside the folder: no card');
+    const inside = claude.onPermission({ tool: 'Edit', input: { file_path: path.join(dir, 'a.txt'), old_string: 'a', new_string: 'b' } });
+    await new Promise((res) => setTimeout(res, 50)); // the host checks the path (and git's folders) before the card
+    const card = s.room.state.transcript.filter((e) => e.kind === 'approval').at(-1).approval;
+    assert.deepStrictEqual([card.status, card.title], ['pending', 'Edit a.txt']);
+    s.room.answerApproval(card.id, 'allow'); assert.strictEqual((await inside).allow, true);
+    s.room.busy.claude = false; // its turn is over
+    // One editor per room.
+    await s.runCommand('/codex access edit');
+    assert.match(s.room.state.transcript.at(-1).text, /Only one agent in a room can edit files, and Claude already can/);
+    // A standing rule ends when the agent's level changes.
+    s.room.state.allowRules = [{ seat: 'claude', scope: s.room._approvalScope() }];
+    await s.runCommand('/claude access read'); assert.strictEqual(s.slots.claude.seat.access, 'read');
+    assert.deepStrictEqual(s.room.state.allowRules, []);
+    await s.runCommand('/codex access run');
+    assert.strictEqual(s.slots.codex.seat.access, 'run'); assert.strictEqual(codex.access, 'run'); assert.match(asked.at(-1), /Let Codex edit files and run commands in/);
+    // Codex was briefed as read only; its next turn opens with what it can do now, once.
+    const turns = []; codex.runTurn = (id, text) => { turns.push(text); return Promise.resolve('ok'); };
+    await s.room.agents.codex.send('first', () => {}, () => {}, [], null);
+    await s.room.agents.codex.send('second', () => {}, () => {}, [], null);
+    assert.match(turns[0], /changed what you can do in this room[\s\S]*apply_patch[\s\S]*first$/);
+    assert.strictEqual(turns[1], 'second');
+    s.room.busy.codex = true;
+    const waiting = codex.o.onApproval({ kind: 'command', command: 'npm test', reason: '' }); void waiting;
+    await new Promise((res) => setTimeout(res, 20));
+    assert.strictEqual(s.room.pendingApprovals.size, 1);
+  } finally { s.dispose(); delete stubs.vscode.window.showWarningMessage; }
+  assert.strictEqual(s.room.state.transcript.filter((e) => e.kind === 'approval').at(-1).approval.status, 'denied', 'closing the room denied the waiting card');
+});

@@ -23,7 +23,11 @@
     return new Date(ms).toLocaleDateString([], { month: 'short', day: 'numeric' });
   };
   const agent = (provider, n) => ({ provider, label: n > 1 ? `${NAME[provider]} ${n}` : NAME[provider], model: '', effort: '', start: S.existing ? 'copy' : 'fresh',
-    conversation: null, share: false, search: '', folder: S.folder, folderLabel: S.folderLabel });
+    conversation: null, share: false, search: '', folder: S.folder, folderLabel: S.folderLabel, access: 'read' });
+  const editor = () => S.agents.find((a) => a.access !== 'read') || null;
+  const ACCESS = [['read', 'Can read files only', 'It can read and search files. It can\'t change anything.'],
+    ['edit', 'Can edit files (asks you first)', 'It can edit files in its folder. Every edit asks you first, as a card in the room.'],
+    ['run', 'Can edit files and run commands (asks you first)', 'It can edit files and run commands in its folder. Every edit and every command asks you first.']];
   const countOf = (p) => S.agents.filter((a) => a.provider === p).length;
   const convs = (p) => (S.lists && S.lists.conversations[p]) || [];
   const models = (p) => (S.lists && S.lists.models[p]) || [];
@@ -37,7 +41,7 @@
     if (!S.init) { app.appendChild(el('p', 'muted', 'Loading…')); return; }
     const head = el('header');
     head.appendChild(el('h1', null, 'Start a room'));
-    head.appendChild(el('p', 'lede', 'Pick the AI agents you want to talk to together. They can read files in their folder. They can\'t edit files or change anything on your computer.'));
+    head.appendChild(el('p', 'lede', 'Pick the AI agents you want to talk to together. They can read files in their folder. One of them can also edit, if you choose, and every edit asks you first.'));
     app.appendChild(head);
 
     const who = el('section'); who.appendChild(el('h2', null, 'Who\'s in the room'));
@@ -52,6 +56,7 @@
     }
     if (S.agents.length >= MAX) adds.appendChild(help(`A room holds up to ${MAX} agents.`));
     who.appendChild(adds); app.appendChild(who);
+    if (editor()) app.appendChild(whereEdits());
 
     const nm = el('section'); nm.appendChild(el('h2', null, 'Name the room'));
     const input = el('input', 'text'); input.value = S.name; input.dataset.key = 'room-name'; input.maxLength = 80; input.setAttribute('aria-label', 'Room name');
@@ -148,15 +153,40 @@
     frow.appendChild(el('code', null, locked ? conv.folder : a.folderLabel || a.folder));
     if (!locked) { const ch = el('button', 'link', 'Change…'); ch.title = 'Choose a different folder for this agent.'; ch.addEventListener('click', () => vscode.postMessage({ type: 'pickFolder', index: i })); frow.appendChild(ch); }
     c.appendChild(frow);
-    c.appendChild(help(locked ? 'Uses the folder where this conversation started, so it can pick up where it left off.' : a.provider === 'codex' ? 'It starts in this folder. Codex can also read files elsewhere on this computer, but it can\'t change anything.' : 'It can read files in this folder and its subfolders.'));
+    c.appendChild(help(locked ? 'Uses the folder where this conversation started, so it can pick up where it left off.' : a.provider === 'codex' ? 'It starts in this folder. Codex can also read files elsewhere on this computer.' : 'It can read files in this folder and its subfolders.'));
+
+    // What it may do. One agent per room above read only.
+    const ac = el('select'); ac.setAttribute('aria-label', 'What it can do'); ac.dataset.key = `access-${i}`;
+    const other = editor() && editor() !== a ? editor() : null;
+    for (const [v, text, tip] of ACCESS) { const o = new Option(text, v); o.title = tip; o.disabled = v !== 'read' && !!other; ac.appendChild(o); }
+    ac.value = a.access;
+    ac.addEventListener('change', () => { a.access = ac.value; if (a.access !== 'read' && a.effort === 'ultracode') a.effort = ''; render(); });
+    const arow = el('div', 'row'); arow.appendChild(el('span', 'label inline', 'It can')); arow.appendChild(ac); c.appendChild(arow);
+    c.appendChild(help(other ? `Only one agent in a room can edit files, and ${other.label || NAME[other.provider]} already can.` : ACCESS.find((x) => x[0] === a.access)[2]));
     return c;
+  }
+
+  // Where the editing agent's changes land.
+  function whereEdits() {
+    const sec = el('section'); sec.appendChild(el('h2', null, 'Where edits go'));
+    const seg = el('div', 'seg'); seg.setAttribute('role', 'radiogroup');
+    for (const [v, text] of [['folder', 'Your folder'], ['copy', 'A separate copy']]) {
+      const on = S.editIn === v, b = el('button', on ? 'on' : null, text); b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(on));
+      b.addEventListener('click', () => { S.editIn = v; render(); }); seg.appendChild(b);
+    }
+    sec.appendChild(seg);
+    sec.appendChild(help(S.editIn === 'copy'
+      ? 'The agents work on a new git branch in a folder of its own, so your folder stays exactly as it is until you bring the changes in. The copy starts from your last commit: changes you haven\'t committed aren\'t in it. In a copy, agents use copies of your conversations, never the originals. Needs a folder that is in a git repository.'
+      : 'Edits land in your folder directly, like Claude Code or Codex on their own. Each one asks you first, and your usual undo and source control work as normal.'));
+    if (S.editIn === 'copy' && S.agents.some((a) => a.start === 'original')) sec.appendChild(el('p', 'warn', 'An agent is set to keep going in your original conversation. In a separate copy, choose a copy for it instead.'));
+    return sec;
   }
 
   function efforts(a) {
     const ms = models(a.provider);
     if (!a.model && a.provider === 'codex') return [...new Set(ms.flatMap((x) => x.efforts || []))]; // Codex's own default model isn't named
     const m = ms.find((x) => x.id === (a.model || 'default')) || ms[0];
-    return (m && m.efforts) || [];
+    return ((m && m.efforts) || []).filter((e) => a.access === 'read' || e !== 'ultracode'); // Ultracode is for read-only agents
   }
 
   function chooser(a, i) {
@@ -210,20 +240,21 @@
       return `${a.label || NAME[a.provider]} (${a.start === 'original' ? 'your original' : 'a copy'} of "${cv ? cv.title.slice(0, 40) : '…'}")`;
     };
     const names = S.agents.map(part);
-    return `Starting ${names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0]}.`;
+    const ed = editor();
+    return `Starting ${names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0]}.${ed ? ` ${ed.label || NAME[ed.provider]} can ${ed.access === 'run' ? 'edit files and run commands' : 'edit files'} in ${S.editIn === 'copy' ? 'a separate copy' : 'your folder'}, asking you first each time.` : ''}`;
   }
 
   function start() {
     S.error = '';
     vscode.postMessage({ type: 'start', form: { name: S.name, agents: S.agents.map((a) => ({ provider: a.provider, label: a.label, model: a.model || null, effort: a.effort || null,
-      start: a.start, conversation: bringsIn(a) ? a.conversation : null, folder: a.folder, share: bringsIn(a) && a.share })) } });
+      start: a.start, conversation: bringsIn(a) ? a.conversation : null, folder: a.folder, share: bringsIn(a) && a.share, access: a.access })), editIn: S.editIn } });
   }
 
   window.addEventListener('message', ({ data: m }) => {
     if (!m || typeof m !== 'object') return;
     if (m.type === 'init') {
       S.init = true; S.existing = !!m.existing; S.trusted = m.trusted !== false; S.name = m.defaults.name; S.folder = m.defaults.folder; S.folderLabel = m.defaults.folderLabel;
-      S.agents = [agent('claude', 1), agent('codex', 1)];
+      S.agents = [agent('claude', 1), agent('codex', 1)]; S.editIn = 'folder';
     } else if (m.type === 'mode') { if (m.existing) for (const a of S.agents) if (a.start === 'fresh') a.start = 'copy'; }
     else if (m.type === 'setup') { S.setup = { claude: m.claude, codex: m.codex }; if (typeof m.trusted === 'boolean') S.trusted = m.trusted; }
     else if (m.type === 'lists') S.lists = { conversations: m.conversations || { claude: [], codex: [] }, models: m.models || { claude: [], codex: [] } };

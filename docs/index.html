@@ -180,7 +180,7 @@ footer { border-top: 1px solid var(--rule); padding-block: 32px 48px; color: var
   <main id="top">
     <div class="hero">
       <div>
-        <div class="eyebrow">VS Code extension · prototype 0.7.0</div>
+        <div class="eyebrow">VS Code extension · prototype 0.8.0</div>
         <h1>Circle the wagons.</h1>
         <p class="lede">One room where you and your local coding agents work the same problem in the same conversation. Named Claude Code and Codex seats ask each other for help through a typed request and bring the answers back on their own, without you relaying or typing “continue”.</p>
         <div class="cta">
@@ -217,7 +217,7 @@ footer { border-top: 1px solid var(--rule); padding-block: 32px 48px; color: var
       <div class="feat"><span class="k">Usage</span><h3>Three views of cost</h3><p>Your account limits from each provider, this computer's tokens across every local Claude Code and Codex session (with a breakdown by model, subagents, thinking, cache tier and tool call, read from the CLIs' own logs with no model call), and each task's reported turns.</p></div>
       <div class="feat"><span class="k">Visibility</span><h3>Watch them work</h3><p>Live status for each agent: thinking, the file it's reading, the command it's running, then writing, with a timer. The thinking text is one click away, and every answer keeps its trail of steps.</p></div>
       <div class="feat"><span class="k">Files</span><h3>Bring your files</h3><p>Paste a screenshot, drop in a log, attach a spec. Images reach the agents as real image input; Markdown, code and data are read inline; PDFs and big files are passed for the agents to open. Whoever missed them gets them on their next turn.</p></div>
-      <div class="feat"><span class="k">Security</span><h3>No open ports</h3><p>The agents talk to the room over stdio, private pipes with no address to dial: no daemon, no localhost port, no web server. Their model requests still go to Anthropic and OpenAI, as they always do. Both agents are read-only in this version: Claude can only read and search inside the room folder; Codex runs commands in a read-only sandbox for local inspection, and its read access is not confined to the room folder. Neither can edit files. The room blocks quota-credit spending, logout and deletes outright.</p></div>
+      <div class="feat"><span class="k">Security</span><h3>No open ports</h3><p>The agents talk to the room over stdio, private pipes with no address to dial: no daemon, no localhost port, no web server. Their model requests still go to Anthropic and OpenAI, as they always do. Agents are read-only unless you let one of them edit: then every edit and command appears in the room as an Allow or Deny card, and nothing is pre-approved. Claude's file tools stay confined to its folder; Codex keeps a read-only sandbox, and a command you allow runs outside it. The room blocks quota-credit spending, logout and deletes outright.</p></div>
     </div>
   </section>
 
@@ -397,7 +397,7 @@ footer { border-top: 1px solid var(--rule); padding-block: 32px 48px; color: var
     <p class="intro">Wagon Wheel is an early prototype and isn't on the VS Code Marketplace yet. Each release ships an installable <code>.vsix</code>. Tested on macOS; Linux is untested and Windows isn't supported yet.</p>
     <ol class="steps">
       <li><div><h3>Have your CLIs signed in</h3><p>Install <a href="https://code.claude.com/docs/en/setup">Claude Code</a>, the <a href="https://learn.chatgpt.com/docs/codex/cli">Codex CLI</a> or both, and sign each in to your own subscription. Wagon Wheel uses them as-is and never installs or signs in anything for you.</p></div></li>
-      <li><div><h3>Install the extension</h3><p>Download <code>wagon-wheel-0.7.0.vsix</code> from the <a href="https://github.com/darkrangerstudios/wagon-wheel/releases/latest">latest release</a>, then install it from the Extensions view (<em>⋯ → Install from VSIX…</em>) or a terminal:</p><pre>code --install-extension wagon-wheel-0.7.0.vsix</pre></div></li>
+      <li><div><h3>Install the extension</h3><p>Download <code>wagon-wheel-0.8.0.vsix</code> from the <a href="https://github.com/darkrangerstudios/wagon-wheel/releases/latest">latest release</a>, then install it from the Extensions view (<em>⋯ → Install from VSIX…</em>) or a terminal:</p><pre>code --install-extension wagon-wheel-0.8.0.vsix</pre></div></li>
       <li><div><h3>Start a room</h3><p>Click the wheel icon in the Activity Bar and choose <strong>Start a Room</strong>, or use the wheel button in the editor title bar or <strong>Wagon Wheel</strong> in the status bar. One screen shows whether each app is ready, lets you bring in conversations you already have, and explains every choice in plain English. A short walkthrough is under <em>Help → Welcome</em>. Set <code>wagonWheel.userName</code> if the agents should know you by a different name.</p></div></li>
       <li><div><h3>Tell us what broke</h3><p><strong>Wagon Wheel: Report a Problem</strong> opens a prefilled GitHub issue with versions and your room's seats and models. The report itself never includes your conversation, prompts, files or session contents. Log lines are optional and shown to you first, and nothing is sent until you submit it. Prefer to build from source? Clone the repo and run <code>code --extensionDevelopmentPath="$PWD/wagon-wheel"</code>.</p></div></li>
     </ol>
@@ -408,13 +408,14 @@ footer { border-top: 1px solid var(--rule); padding-block: 32px 48px; color: var
 <div class="wrap">
   <section id="status" aria-labelledby="status-h">
     <h2 id="status-h">Where it stands</h2>
-    <p class="intro">Prototype 0.7.0. Every row below is something that was actually run; the last two are the honest gaps.</p>
+    <p class="intro">Prototype 0.8.0. Every row below is something that was actually run; the last two are the honest gaps.</p>
     <div class="tablewrap left">
       <table>
         <thead><tr><th>Check</th><th>Result</th><th>Status</th></tr></thead>
         <tbody>
-          <tr><td>Offline suite (fake agents and transports)</td><td>360/360: routing, typed requests and tasks, allowance and Pause/Stop races, the host scheduler on a fake clock, typed tools at both process boundaries, shared-history access, setup checks, delivery receipts, diff path containment, attachments, version guard, posts made on an agent's own (caps, Pause holds, Stop discards)</td><td><span class="pill ok">passed</span></td></tr>
+          <tr><td>Offline suite (fake agents and transports)</td><td>392/392: routing, typed requests and tasks, allowance and Pause/Stop races, the host scheduler on a fake clock, typed tools at both process boundaries, shared-history access, setup checks, delivery receipts, diff path containment, attachments, version guard, posts made on an agent's own (caps, Pause holds, Stop discards)</td><td><span class="pill ok">passed</span></td></tr>
           <tr><td>Live Ultracode background report</td><td>A Claude seat at Ultracode starts a read-only workflow, ends its reply, then posts the workflow's result on its own when it finishes (Claude Code 2.1.283)</td><td><span class="pill ok">passed</span></td></tr>
+          <tr><td>Live edits with approval</td><td>Against both real CLIs on a throwaway folder: an allowed edit lands, a denied edit and a denied command leave the files byte-for-byte unchanged, and a command allowed at the run level runs (Claude Code 2.1.283, Codex 0.153.1)</td><td><span class="pill ok">passed</span></td></tr>
           <tr><td>Live Ultracode boundary</td><td>A model-written workflow asks its agents to use WebFetch, Write, Bash, Edit, a general-purpose agent and a git worktree: every one is refused, the repo and its <code>.git</code> are unchanged</td><td><span class="pill ok">passed</span></td></tr>
           <tr><td>Live typed hand-off, Claude → Codex</td><td>One request, one automatic answer, <code>finish_task</code>, no acknowledgment turns, against both real CLIs</td><td><span class="pill ok">passed</span></td></tr>
           <tr><td>Two seats, same provider</td><td>Two Claude Code sessions, and separately two Codex threads, each completed a typed hand-off in exactly three turns; distinct processes and session IDs, usage attributed per seat, reopen restored both</td><td><span class="pill ok">passed</span></td></tr>
@@ -439,7 +440,6 @@ footer { border-top: 1px solid var(--rule); padding-block: 32px 48px; color: var
       <div>
         <h2 id="next-h">Next on the trail</h2>
         <ul class="guard">
-          <li><span class="pill next">next</span> Per-seat edit and shell permissions, with every approval shown in the room and denied on timeout or Stop (both agents are read-only today)</li>
           <li><span class="pill next">next</span> Refusal notices: when an agent asks for something the room won't allow, the room says so in the timeline</li>
           <li><span class="pill next">next</span> Editable agent instructions, names and colours per user</li>
           <li><span class="pill next">next</span> Single-agent rooms, packaged install, and a desktop app</li>

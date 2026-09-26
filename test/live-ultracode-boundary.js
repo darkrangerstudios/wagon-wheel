@@ -9,7 +9,7 @@ const { findClaude } = require('../src/claudeBinary');
 const exe = process.argv[2] || findClaude(null).path;
 const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ww-bound-')));
 fs.writeFileSync(path.join(dir, 'a.txt'), 'alpha\n');
-execSync('git init -q && git add . && git -c user.email=t@t -c user.name=t commit -qm init', { cwd: dir });
+execSync('git init -q && git add . && git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -qm init', { cwd: dir });
 const before = fs.readdirSync(path.join(dir, '.git')).sort().join(',');
 const script = `export const meta = { name: 'boundary-probe', description: 'boundary probe', phases: [{ title: 'Probe' }] }
 phase('Probe')

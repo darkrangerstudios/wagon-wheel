@@ -22,6 +22,10 @@ const roomsView = require('./roomsView');
 const roomLock = require('./roomLock');
 const startRoom = require('./startRoom');
 const claudeModels = require('./claudeModels');
+const copyMode = require('./copyMode');
+const editPolicy = require('./editPolicy');
+const { accessText } = require('./prompts');
+const { claudeCard, codexCard } = require('./approvalCards');
 const { ULTRACODE } = claudeModels;
 
 // Token use across every local session on this computer (all rooms share one scanner; rescans read only new bytes).
@@ -49,7 +53,8 @@ const claudeMenu = () => claudeCatalog || commands.CLAUDE_CATALOG;
 // Claude Code lists Ultracode with its effort levels (/effort ultracode: "xhigh + dynamic workflow orchestration"), for
 // models that offer Extra high. Tested with Claude Code 2.1.283; older CLIs don't get it.
 const ULTRACODE_CLI = '2.1.283';
-const claudeEfforts = (cat, v) => { const e = (cat && cat.efforts) || []; return e.includes('xhigh') && atLeast(v, ULTRACODE_CLI) ? [...e, ULTRACODE] : e; };
+// An agent that can edit never gets Ultracode: a workflow's agents can't show an approval card.
+const claudeEfforts = (cat, v, access = 'read') => { const e = (cat && cat.efforts) || []; return access === 'read' && e.includes('xhigh') && atLeast(v, ULTRACODE_CLI) ? [...e, ULTRACODE] : e; };
 // The Start a Room screen's Claude models: the ones this CLI can run.
 const startClaudeModels = (v) => claudeMenu().filter((m) => !m.minCli || atLeast(v, m.minCli)).map((m) => ({ id: m.id, name: m.name, note: m.note, efforts: claudeEfforts(m, v), older: !!m.older }));
 // Weekly limits are per model family ("Fable"); Default (recommended) counts against the model it resolves to.
@@ -222,7 +227,9 @@ class RoomSession {
   brief(r, typed) { return participantPrompt(r.seat, this.peers(r.seat.id), this.meta.humanName, typed); }
 
   async makeCodex(r, action, source, valid = () => !this.disposed) {
-    const p = r.seat, c = new CodexClient({ exe: this.options.codexExe, cwd: p.cwd, tools: this.toolsFor(p.id), log });
+    const p = r.seat, c = new CodexClient({ exe: this.options.codexExe, cwd: p.cwd, tools: this.toolsFor(p.id), log, access: p.access || 'read',
+      onApproval: (req) => this.approve(r, c, codexCard(req, (x) => this.rel(p, x))),
+      onRefused: (x) => !this.disposed && this.room && this.room.note(`${p.label} asked to run \`${String(x.command).slice(0, 120)}\` outside its sandbox; refused, because it can edit files but not run commands.`) });
     this.ownedClients.add(c); if (r.switching) r.switchClient = c;
     let ready = false;
     try {
@@ -231,6 +238,7 @@ class RoomSession {
       if (action === 'continue') t = await c.resumeThread(source);
       else if (action === 'fork') t = await c.forkThread(source, this.brief(r, false));
       else t = await c.startThread(this.brief(r, true));
+      if (action !== 'continue') p.briefAccess = p.access || 'read'; // what its instructions say it can do
       if (!valid()) return null;
       // Name threads the room creates; never rename a conversation the person brought in as the original.
       if (action !== 'continue') { await c.setName(t.id, `Wagon Wheel: ${this.meta.name} · ${p.label}`); if (!valid()) return null; }
@@ -241,11 +249,36 @@ class RoomSession {
     } finally { if (!ready) { c.stop(); this.ownedClients.delete(c); } }
   }
 
+  // One approval card for either vendor. The host decides first (editPolicy): outside the agent's folder, inside git's
+  // own folder or with no known files is refused without a card; a file that can run code always gets a card.
+  async approve(r, client, req) {
+    const gone = () => this.disposed || !this.room || r.client !== client;
+    if (gone()) return { allow: false, why: 'the room is closed' };
+    const root = r.seat.cwd;
+    let verdict = { refused: null, sensitive: null };
+    if (req.kind === 'edit') verdict = editPolicy.check(req.paths || [], root, await editPolicy.gitDirs(root));
+    else if ((req.paths || []).some((x) => !editPolicy.within(editPolicy.abs(root, x), root))) verdict.refused = 'outside its folder';
+    if (gone()) return { allow: false, why: 'the room is closed' };
+    return this.room.requestApproval(r.seat.id, { ...req, refused: req.refused || verdict.refused, sensitive: verdict.sensitive });
+  }
+
+  // Codex's instructions are fixed when its thread starts, so a level changed since then is said at the top of its next
+  // turn (and remembered once that turn went through).
+  codexTurn(r, text, delta, activity, files, onTool) {
+    const p = r.seat, now = p.access || 'read', told = p.briefAccess || 'read';
+    const lead = now !== told ? `[Wagon Wheel notice: ${this.meta.humanName} changed what you can do in this room. This replaces what you were told before.] ${accessText('codex', now, this.meta.humanName)}\n\n` : '';
+    return r.client.runTurn(p.sessionId, lead + text, delta, activity, files, { model: p.model, effort: p.effort, fast: p.fast, onTool })
+      .then((out) => { if (lead) { p.briefAccess = now; this.save(); } return out; });
+  }
+
+  rel(p, file) { const r = path.relative(p.cwd, path.resolve(p.cwd, String(file || ''))); return r && !r.startsWith('..') ? r : String(file || ''); }
+
   makeClaude(r, sessionId, forkFrom) {
     const p = r.seat;
     const c = new ClaudeClient({ exe: this.options.claude.path, cwd: p.cwd, model: p.model, effort: p.effort, fast: !!p.fast && this.claudeFastOk(p.model),
       onNotice: (t) => !this.disposed && this.room && this.room.note(`${p.label}: ${t}`), systemPrompt: this.brief(r, true), tools: this.toolsFor(p.id),
-      onSession: (id) => this.adoptId(r, c, id), sessionId, forkFrom, addDirs: [this.attDir], log,
+      onSession: (id) => this.adoptId(r, c, id), sessionId, forkFrom, addDirs: [this.attDir], log, access: p.access || 'read',
+      onPermission: (req) => this.approve(r, c, claudeCard(req, (x) => this.rel(p, x))),
       // A background job (Ultracode) finished after Claude's reply ended: the room decides whether its report is posted.
       onUnprompted: (info) => (this.disposed || !this.room || r.client !== c ? null : this.room.unprompted(p.id, info)),
       onJobs: (jobs) => { if (this.disposed || (r.client !== c && jobs.length)) return; r.jobs = jobs; this.post({ type: 'jobs', name: p.id, jobs }); } });
@@ -361,7 +394,7 @@ class RoomSession {
       const p = r.seat;
       agents[p.id] = { get typed() { return p.typed; }, get lastTurnUsage() { return r.client.lastTurnUsage; },
         send: (text, delta, activity, files, onTool) => (p.provider === 'codex'
-          ? r.client.runTurn(p.sessionId, text, delta, activity, files, { model: p.model, effort: p.effort, fast: p.fast, onTool })
+          ? this.codexTurn(r, text, delta, activity, files, onTool)
           : r.client.send(text, delta, activity, files, onTool)).finally(() => { this.syncSeats(); if (p.provider === 'codex') this.refreshQuota(); }),
         interrupt: () => r.client.interrupt(), steer: (text, files) => p.provider === 'codex' ? r.client.steer(p.sessionId, text, files) : r.client.steer(text, files) };
     }
@@ -392,6 +425,9 @@ class RoomSession {
       for (const r of Object.values(this.slots)) { const n = r.client && r.client.stopJobs ? r.client.stopJobs() : 0; if (n) this.room.note(`${r.seat.label}: stopped ${n} background job${n === 1 ? '' : 's'}.`); }
     });
     this.room.on('changed', () => this.save()); this.room.on('task', () => this.postTask());
+    // Records that can come many per turn (approval cards) are saved once things settle, not one full write each.
+    this.room.on('dirty', () => { clearTimeout(this.saveTimer); this.saveTimer = setTimeout(() => { if (!this.disposed) this.save(); }, 750); });
+    this.room.on('approval', (entry) => this.post({ type: 'approval', entry: this.view(entry) }));
     this.scheduler = new Scheduler({ log });
     this.scheduler.add('task-clock', { everyMs: 15000, check: async () => { this.room.tick(); return 'quiet'; } });
     this.scheduler.add('usage', { everyMs: 5 * 60e3, check: async () => { await Promise.all([this.refreshQuota(), this.refreshClaudeUsage(true), this.refreshLocalUsage()]); return 'quiet'; } });
@@ -468,6 +504,13 @@ class RoomSession {
       else if (m.type === 'pickFiles') vscode.window.showOpenDialog({ canSelectMany: true, openLabel: 'Attach' }).then((uris) => (uris || []).forEach((u) => this.addAttachment({ name: path.basename(u.fsPath), fromPath: u.fsPath })));
       else if (m.type === 'unattach') { const a = this.pendingAtts.get(m.id); if (a) { this.pendingAtts.delete(m.id); fs.rm(a.path, () => {}); } }
       else if (m.type === 'stop' && this.room) this.room.stopAll();
+      else if (m.type === 'approval' && this.room && typeof m.id === 'string' && ['allow', 'allowTask', 'deny'].includes(m.decision)) this.room.answerApproval(m.id, m.decision);
+      else if (m.type === 'approvalFull' && this.room && typeof m.id === 'string') {
+        const p = this.room.pendingApprovals.get(m.id);
+        // A read-only view (the room's own document scheme), so closing VS Code never asks to save it.
+        if (p && p.full) { const key = `/change-${m.id}-${Date.now()}.diff`; proposed.set(key, p.full); vscode.workspace.openTextDocument(vscode.Uri.parse(`wagon-wheel-proposed:${key}`)).then((d) => vscode.window.showTextDocument(d, { preview: true }), (e) => log(`full change: ${e.message}`)); }
+      }
+      else if (m.type === 'copy' && this.room && this.meta.copy && ['open', 'bringIn', 'remove', 'refresh'].includes(m.action)) this.copyAction(m.action).catch((e) => this.room && this.room.note(`Separate copy: ${e.message}`));
       else if (m.type === 'moveOut' && this.room && this.slots[m.vendor]) this.moveOut(m.vendor).catch((e) => this.room && this.room.note(`Couldn't move the conversation out: ${e.message}`));
       else if (m.type === 'copyResume' && this.room && this.slots[m.vendor] && ['source', 'fork'].includes(m.which)) {
         const cmd = this.resumeCommand(m.vendor, m.which);
@@ -546,6 +589,9 @@ class RoomSession {
         if (!items.length) { room.note(`No other ${p.provider === 'claude' ? `Claude conversations from ${L}'s folder` : 'Codex conversations'} were found for ${L}.`); return; }
         pick = await vscode.window.showQuickPick(items, { title: `${L}: ${action === 'switch' ? 'switch to one of your conversations' : action === 'fork' ? 'work on a copy of a conversation' : 'keep going in a conversation'}`, placeHolder: 'Your recent conversations, newest first', matchOnDetail: true });
         if (!pick || !live()) return;
+        // In a separate copy, agents use copies of conversations: an original would carry the copy's folder home.
+        if (action === 'continue' && this.meta.copy) { room.note(`In a separate copy, ${L} can use a copy of that conversation, not the original.`); action = 'fork'; }
+        if (action === 'switch' && this.meta.copy) action = 'fork';
         if (action === 'switch') {
           const how = await vscode.window.showQuickPick([
             { label: 'Work on a copy (recommended)', detail: 'Your original conversation stays exactly as it is. The agent continues from a copy.', action: 'fork' },
@@ -591,6 +637,45 @@ class RoomSession {
       const pending = room.pending[id]; room.pending[id] = 0;
       if (pending && !this.disposed) room.deliver(id, pending);
     }
+  }
+
+  // Read only / can edit / can edit and run commands. One agent above read only per room; raising a level in your own
+  // folder asks first. Claude restarts on the same conversation with the new tools; Codex applies it from its next turn.
+  async setAccess(r, level) {
+    const room = this.room, p = r.seat, L = p.label, now = p.access || 'read';
+    if (!['read', 'edit', 'run'].includes(level) || level === now) return;
+    if (room.busy[p.id] || (r.jobs || []).length) { room.note(`${L} is busy. Let it finish, or press Stop, before changing what it can do.`); return; }
+    const other = Object.values(this.slots).find((o) => o !== r && (o.seat.access || 'read') !== 'read');
+    if (level !== 'read' && other) { room.note(`Only one agent in a room can edit files, and ${other.seat.label} already can. Set ${other.seat.label} to read only first.`); return; }
+    if (level !== 'read' && now === 'read') {
+      const where = this.meta.copy ? `the separate copy of your project (branch ${this.meta.copy.branch})` : p.cwd;
+      const go = await vscode.window.showWarningMessage(`Let ${L} ${level === 'run' ? 'edit files and run commands' : 'edit files'} in ${where}?`, { modal: true,
+        detail: `Every ${level === 'run' ? 'edit and command' : 'edit'} asks you first, as a card in the room. Files outside ${where === p.cwd ? 'that folder' : 'the copy'} are refused.${level === 'run' ? ` ${p.provider === 'codex' ? 'A command you allow runs outside Codex\'s sandbox.' : 'A command you allow runs with your user account.'}` : ''}` }, level === 'run' ? 'Allow edits and commands' : 'Allow edits');
+      if (!go || this.disposed || room.busy[p.id]) return;
+      const took = Object.values(this.slots).find((o) => o !== r && (o.seat.access || 'read') !== 'read'); // changed while the question was open
+      if (took) { room.note(`Only one agent in a room can edit files, and ${took.seat.label} already can.`); return; }
+    }
+    p.access = level; room.clearAllowRules(p.id);
+    if (p.provider === 'claude') {
+      const effort = p.effort === ULTRACODE && level !== 'read' ? 'xhigh' : undefined; if (effort) p.effort = effort;
+      r.client.systemPrompt = this.brief(r, true); r.client.setOptions({ access: level, ...(effort ? { effort } : {}) });
+    } else r.client.access = level;
+    const text = { read: 'read only', edit: 'able to edit files, asking you before each edit', run: 'able to edit files and run commands, asking you before each one' }[level];
+    room.note(`${L} is now ${text}.${p.provider === 'claude' && p.effort === 'xhigh' && level !== 'read' ? ' Its effort changed from Ultracode to Extra high: Ultracode is for read-only agents.' : ''}`);
+    this.save();
+  }
+
+  // The separate copy: open it, bring its changes into your folder (a command you run), or remove it (same).
+  async copyAction(action) {
+    const c = this.meta.copy, room = this.room;
+    if (action === 'open') { await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(c.dir), { forceNewWindow: true }); return; }
+    if (action === 'refresh') { try { this.post({ type: 'copyChanges', changes: await copyMode.changes(c) }); } catch (e) { log(`copy changes: ${e.message}`); } return; } // a count; never a room note
+    const busy = Object.values(room.busy).some(Boolean);
+    const cmd = action === 'bringIn' ? copyMode.bringInCommand(c, this.meta.name) : copyMode.removeCommand(c);
+    await vscode.env.clipboard.writeText(cmd);
+    room.note(action === 'bringIn'
+      ? `Copied a command that brings the copy's changes into ${c.repo}: it commits them on ${c.branch}, then merges that branch into the branch you have checked out there. Paste it in a terminal when you're ready.${busy ? ' An agent is still working; wait for it to finish first.' : ''}`
+      : `Copied a command that removes the copy and its branch ${c.branch}. Anything not brought into your folder is lost. Close this room first.`);
   }
 
   postTask() {
@@ -713,8 +798,8 @@ class RoomSession {
         session: r.client?.sessionId || p.sessionId || p.forkFrom, typed: !!p.typed,
         shared: !!this.history?.describe().share[p.id], readers: this.history ? this.history.readers(p.id) : [], allHistory: !this.history || this.history.allHistory(p.id),
         cli: p.provider === 'claude' && v ? v.join('.') : undefined, model: p.model || models[0]?.id || null, effort: p.effort, fast: !!p.fast, models,
-        jobs: r.jobs || [],
-        efforts: p.provider === 'claude' ? (() => { const cat = claudeMenu().find((x) => x.id === (p.model || 'default')); return cat ? claudeEfforts(cat, v) : commands.CLAUDE_EFFORTS; })() : undefined }];
+        jobs: r.jobs || [], access: p.access || 'read', editorElsewhere: Object.values(this.slots).some((o) => o !== r && (o.seat.access || 'read') !== 'read'),
+        efforts: p.provider === 'claude' ? (() => { const cat = claudeMenu().find((x) => x.id === (p.model || 'default')); return cat ? claudeEfforts(cat, v, p.access) : commands.CLAUDE_EFFORTS; })() : undefined }];
     }));
   }
 
@@ -732,6 +817,7 @@ class RoomSession {
       const r = this.slots[spec.participant]; if (!r) return;
       const p = r.seat, action = spec.action;
       if (action === 'session') { await this.switchSession(p.id, arg); return; }
+      if (action === 'access') { await this.setAccess(r, arg); this.postMeta(); return; }
       if (action === 'model' || action === 'effort') {
         if (p.provider === 'claude') {
           const cat = claudeMenu().find((x) => x.id === arg);
@@ -739,12 +825,12 @@ class RoomSession {
           if (blocked) { say(`${p.label}: ${blocked}. Model unchanged.`); return; }
           if (action === 'effort') {
             const now = claudeMenu().find((x) => x.id === (p.model || 'default'));
-            if (now && !claudeEfforts(now, this.claudeVersion).includes(arg)) { say(`${now.name} doesn't offer that effort level.`); return; }
+            if (now && !claudeEfforts(now, this.claudeVersion, p.access).includes(arg)) { say(arg === ULTRACODE && p.access !== 'read' ? `Ultracode is for read-only agents: a workflow's agents can't ask you before editing. Set ${p.label} to read only first.` : `${now.name} doesn't offer that effort level.`); return; }
           }
           if (action === 'model' && p.fast && !this.claudeFastOk(arg)) { p.fast = false; r.client.setOptions({ fast: false }); }
           const opts = { [action]: arg };
           // A model that doesn't offer the current effort level (Haiku has none) starts without one, in the same restart.
-          if (action === 'model' && p.effort && cat && !claudeEfforts(cat, this.claudeVersion).includes(p.effort)) { p.effort = null; opts.effort = null; }
+          if (action === 'model' && p.effort && cat && !claudeEfforts(cat, this.claudeVersion, p.access).includes(p.effort)) { p.effort = null; opts.effort = null; }
           r.client.setOptions(opts);
         } else if (action === 'model') {
           const model = r.models.find((x) => x.id === arg);
@@ -830,7 +916,7 @@ class RoomSession {
     // A session whose boot failed is already disposed, but its panel is closing now: forget it either way.
     if (this.disposed) { sessions.delete(this); this.panel = null; refreshRooms(); return; } // e.g. a room that failed to start
     // Save the closing checkpoint once; late boot/turn/usage completions may never save again.
-    try { this.save(); } finally {
+    try { clearTimeout(this.saveTimer); if (this.room) this.room.denyApprovals('the room was closed'); this.save(); } finally {
       this.disposed = true;
       sessions.delete(this); if (this.scheduler) this.scheduler.dispose();
       this.closeClients(); this.panel = null;
@@ -1028,6 +1114,16 @@ async function startFromForm(context, form) {
     if (!go) return false;
   }
   const meta = newMeta(plan.name);
+  // A separate copy: a new branch of the editing agent's repository in the room's own storage. Every agent whose folder
+  // is in that repository works in the copy, so they all see the edits; the person's folder is not touched.
+  if (plan.editIn === 'copy') {
+    const ed = plan.seats.find((p) => p.access !== 'read');
+    const repo = await copyMode.repoRoot(ed.cwd);
+    if (!repo) throw new Error(`${ed.label}: its folder isn't in a git repository, so a separate copy can't be made. Choose "Your folder" instead.`);
+    try { meta.copy = await copyMode.create({ repo, dir: path.join(context.globalStorageUri.fsPath, 'rooms', meta.id, 'copy'), branch: copyMode.branchName(plan.name, meta.id) }); }
+    catch (e) { throw new Error(`A separate copy couldn't be made: ${e.message}.`); }
+    for (const p of plan.seats) if (copyMode.within(p.cwd, repo)) p.cwd = copyMode.mapPath(p.cwd, meta.copy);
+  }
   meta.cwd = plan.seats.some((p) => p.cwd === s.cwd) ? s.cwd : plan.seats[0].cwd;
   meta.seats = plan.seats; meta.sources = plan.sources;
   const screen = startScreen.panel;

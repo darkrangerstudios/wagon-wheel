@@ -39,9 +39,14 @@ function describeItem(item) {
 class CodexClient extends EventEmitter {
   // tools: typed room tools, attached to threads this client STARTS (app-server takes dynamicTools only on
   // thread/start; they persist across thread/resume). Calls go to the running turn's onTool.
-  constructor({ exe, cwd, tools = [], log = () => {} }) {
+  // access: 'read' | 'edit' | 'run'. The sandbox stays read-only at every level; above read only, each turn runs with
+  // approvals "on-request", so every file change (and, at "run", every command that needs more than the sandbox)
+  // asks first. onApproval({ kind, command, reason, cwd, paths, diff }) answers { allow, why }. At "edit", command
+  // requests are declined without asking.
+  constructor({ exe, cwd, tools = [], log = () => {}, access = 'read', onApproval = null, onRefused = () => {} }) {
     super();
-    this.exe = exe; this.cwd = cwd; this.log = log; this.tools = tools;
+    this.exe = exe; this.cwd = cwd; this.log = log; this.tools = tools; this.access = access; this.onApproval = onApproval; this.onRefused = onRefused;
+    this.items = new Map(); // recent file-change items by id: their paths and diffs, for the approval card
     this.verifiedThreads = new Set(); this.permissionEpoch = 0;
     this.nextId = 0; this.pending = new Map(); this.proc = null;
   }
@@ -72,11 +77,16 @@ class CodexClient extends EventEmitter {
     let m;
     try { m = JSON.parse(line); } catch { return; }
     if (m.id !== undefined && m.method === 'item/tool/call') { this._onToolCall(m); return; }
+    if (m.id !== undefined && (m.method === 'item/fileChange/requestApproval' || m.method === 'item/commandExecution/requestApproval')) { this._onApprovalRequest(m); return; }
     if (m.id !== undefined && m.method) {
-      // Server-to-client request (approval, user input). The room never grants anything.
+      // Any other server-to-client request (user input, permissions, elicitation). The room never grants those.
       this.log(`codex asked ${m.method}; declined`);
       this._write({ id: m.id, error: { code: -32601, message: 'Wagon Wheel does not grant approvals or input' } });
       return;
+    }
+    if (m.method === 'item/started' && m.params && m.params.item && m.params.item.type === 'fileChange') {
+      this.items.set(m.params.item.id, m.params.item);
+      if (this.items.size > 100) this.items.delete(this.items.keys().next().value);
     }
     if (m.id !== undefined && this.pending.has(m.id)) {
       const { resolve, reject } = this.pending.get(m.id); this.pending.delete(m.id);
@@ -96,6 +106,27 @@ class CodexClient extends EventEmitter {
       if (this.currentTurn !== t || t.cancelled) r = { ok: false, text: 'Not delivered: that turn already ended.' }; // Stopped or finished while the tool ran
     }
     try { this._write({ id: m.id, result: { contentItems: [{ type: 'inputText', text: String(r.text || '') }], success: !!r.ok } }); } catch (e) { this.log(`tool reply: ${e.message}`); }
+  }
+
+  // Codex asking to change files or to run a command outside its read-only sandbox. Only the running turn on that
+  // thread can be asked, and only above read only; the room's answer becomes Codex's decision.
+  async _onApprovalRequest(m) {
+    const p = m.params || {}, t = this.currentTurn, command = m.method === 'item/commandExecution/requestApproval';
+    let ans = { allow: false, why: 'not available' };
+    if (!t || t.cancelled || t.threadId !== p.threadId || this.access === 'read' || !this.onApproval) ans = { allow: false, why: 'no turn is open' };
+    else if (command && this.access !== 'run') { ans = { allow: false, why: 'this agent can edit files but not run commands' }; this.onRefused({ kind: 'command', command: p.command || '', reason: p.reason || '' }); }
+    else {
+      // Every path a change touches, including where an update moves a file (kind.move_path). An item the room never
+      // saw has no paths, and the host refuses it rather than guess.
+      const item = this.items.get(p.itemId) || {};
+      const changes = (Array.isArray(item.changes) ? item.changes : []).map((c) => ({ path: typeof c.path === 'string' ? c.path : '', type: c.kind && c.kind.type, to: c.kind && typeof c.kind.move_path === 'string' ? c.kind.move_path : null, diff: typeof c.diff === 'string' ? c.diff : '' }));
+      try {
+        ans = await this.onApproval(command ? { kind: 'command', command: String(p.command || ''), reason: p.reason || '', cwd: p.cwd || this.cwd }
+          : { kind: 'edit', reason: p.reason || '', grantRoot: p.grantRoot || null, changes, paths: changes.flatMap((c) => [c.path, c.to]).filter(Boolean), diff: changes.map((c) => c.diff).join('\n') });
+      } catch (e) { ans = { allow: false, why: e.message }; }
+      if (this.currentTurn !== t || t.cancelled) ans = { allow: false, why: 'that turn already ended' };
+    }
+    try { this._write({ id: m.id, result: { decision: ans.allow ? 'accept' : 'decline' } }); } catch (e) { this.log(`approval reply: ${e.message}`); }
   }
 
   request(method, params, timeoutMs = 120000) {
@@ -248,7 +279,8 @@ class CodexClient extends EventEmitter {
       const onExit = (err) => { cleanup(); reject(err); };
       const cleanup = () => { this.off('notification', onNote); this.off('exit', onExit); if (this.currentTurn === active) this.currentTurn = null; };
       this.on('notification', onNote); this.once('exit', onExit);
-      this.request('turn/start', { threadId, input: toCodexInput(text, attachments), ...(opts.model ? { model: opts.model } : {}), ...(opts.effort ? { effort: opts.effort } : {}), ...(opts.fast ? { serviceTierForTurn: 'priority' } : {}) })
+      // The approval policy is set on every turn: "never" at read only (nothing can ask), "on-request" above it.
+      this.request('turn/start', { threadId, input: toCodexInput(text, attachments), approvalPolicy: this.access === 'read' ? 'never' : 'on-request', ...(opts.model ? { model: opts.model } : {}), ...(opts.effort ? { effort: opts.effort } : {}), ...(opts.fast ? { serviceTierForTurn: 'priority' } : {}) })
         .then((r) => { if (!turnId) turnId = active.turnId = r && r.turn && r.turn.id; if (active.cancelled && active.started) this._interruptTurn(active); })
         .catch((e) => { cleanup(); reject(e); });
     });

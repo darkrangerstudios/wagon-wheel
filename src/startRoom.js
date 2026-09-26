@@ -82,8 +82,12 @@ function buildPlan(form, { lists = {}, codexModels = [], claudeModels = null, de
     // No model chosen means Codex's own default, which the host can't name: accept any effort a listed model offers.
     const efforts = a.provider === 'claude' ? ((claudeList && (claudeList.find((m) => m.id === (model || 'default')) || {}).efforts) || CLAUDE_EFFORTS) : model ? (codexModels.find((m) => m.id === model).efforts || []) : [...new Set(codexModels.flatMap((m) => m.efforts || []))];
     const effort = a.effort == null || a.effort === '' ? null : efforts.includes(a.effort) ? a.effort : fail(`${label}: that thinking effort isn't available for this model.`);
+    const access = a.access === undefined || a.access === null ? 'read' : ['read', 'edit', 'run'].includes(a.access) ? a.access : fail(`${label}: choose what it can do.`);
+    if (access !== 'read' && effort === 'ultracode') fail(`${label}: Ultracode is for agents that can only read. Choose another effort, or set it to read only.`);
+    if (access !== 'read' && seats.some((x) => x.access !== 'read')) fail(`Only one agent in a room can edit files. Set ${label} or ${seats.find((x) => x.access !== 'read').label} to read only.`);
+    if (form.editIn === 'copy' && start === 'original' && form.agents.some((x) => x && x.access && x.access !== 'read')) fail(`${label}: in a separate copy, agents work on copies of your conversations. Choose a copy for it.`);
     const id = slug(label, a.provider, taken);
-    const seat = { id, label, provider: a.provider, cwd, model, effort };
+    const seat = { id, label, provider: a.provider, cwd, model, effort, access };
     if (start === 'original') seat.sessionId = conv.id;
     if (start === 'copy') seat.forkFrom = conv.id;
     if (a.provider === 'codex' && start !== 'fresh') seat.typed = false; // a Codex thread's request tools are fixed when it is created
@@ -93,7 +97,8 @@ function buildPlan(form, { lists = {}, codexModels = [], claudeModels = null, de
     // Which of the person's conversations this agent started from, so the room can say so later.
     if (start !== 'fresh') sources[id] = { kind: start, id: conv.id, title: typeof conv.title === 'string' ? conv.title.slice(0, 120) : null };
   });
-  return { name, seats: normalizeParticipants({ seats }, settings), shareSeed, originals: picked, sources };
+  const editIn = form.editIn === 'copy' && seats.some((x) => x.access !== 'read') ? 'copy' : 'folder';
+  return { name, seats: normalizeParticipants({ seats }, settings), shareSeed, originals: picked, sources, editIn };
 }
 
 // Wagon Wheel's own room conversations don't belong in "your conversations". Claude: sessions Wagon Wheel ran (the

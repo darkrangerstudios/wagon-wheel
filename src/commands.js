@@ -63,7 +63,8 @@ function participantSpecs({ participants, controls = {} }) {
       command('effort', { args: efforts, desc: `Thinking effort for ${p.label || p.id}${current ? ` (${current.id})` : ''}` }),
       command('fast', { args: ['on', 'off'], desc: p.provider === 'claude' ? 'Opus fast mode; billed to usage credits' : 'Priority tier: faster, uses more of your Codex quota' }),
       command('compact', { desc: `Summarize ${p.label || p.id}'s conversation to free up space` }),
-      command('session', { args: ['new', 'switch', 'continue', 'fork'], desc: `Start ${p.label || p.id} over (new), or switch it to one of your conversations (switch asks copy or original)` })
+      command('session', { args: ['new', 'switch', 'continue', 'fork'], desc: `Start ${p.label || p.id} over (new), or switch it to one of your conversations (switch asks copy or original)` }),
+      command('access', { args: ['read', 'edit', 'run'], desc: `What ${p.label || p.id} may do: read only, edit files, or edit files and run commands (each edit and command asks you first)` })
     ];
   }));
 }

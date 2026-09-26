@@ -103,3 +103,53 @@ test('when another room\'s file can\'t be read, the menu says Wagon Wheel can\'t
   assert.match(h.ids.pop.textContent, /can't confirm nothing is writing to your original right now/);
   assert.doesNotMatch(h.ids.pop.textContent, /Another agent is keeping going/);
 });
+
+test('an approval card: Allow, Allow edits for this task and Deny; the answer replaces it; the agent shows as waiting', () => {
+  const { setup, walk } = require('./fixtures/webview-dom');
+  const h = setup();
+  const entry = { id: 7, from: 'system', kind: 'approval', ts: Date.now(), text: 'Edit a.txt', approval: { id: 'a7', seat: 'codex', kind: 'edit', title: 'Edit a.txt', paths: ['/fixture/app/a.txt'], detail: '-a\n+b', status: 'pending' } };
+  h.receive({ type: 'message', entry }); h.receive({ type: 'status', name: 'codex', busy: true });
+  assert.match(h.ids.log.textContent, /Builder wants to edit/);
+  assert.match(h.ids.who.textContent, /waiting for you to allow or deny/);
+  h.click(h.ids.log, 'Allow edits for this task');
+  assert.deepEqual(h.sent.at(-1), { type: 'approval', id: 'a7', decision: 'allowTask' });
+  assert.ok(walk(h.ids.log).filter((e) => e.tagName === 'button').every((b) => b.disabled), 'answered once');
+  h.receive({ type: 'approval', entry: { ...entry, approval: { ...entry.approval, status: 'allowedTask' } } });
+  assert.match(h.ids.log.textContent, /Allowed, with its other edits for this task/);
+  assert.ok(!walk(h.ids.log).some((e) => e.tagName === 'button' && e.textContent === 'Deny'));
+  // A command card has no "for this task" choice.
+  h.receive({ type: 'message', entry: { ...entry, id: 8, approval: { ...entry.approval, id: 'a8', kind: 'command', title: 'Run outside the sandbox: touch b', detail: null, command: 'touch b' } } });
+  assert.ok(!walk(h.ids.log).some((e) => e.tagName === 'button' && e.textContent === 'Allow edits for this task'));
+  h.click(h.ids.log, 'Deny'); assert.deepEqual(h.sent.at(-1), { type: 'approval', id: 'a8', decision: 'deny' });
+  h.receive({ type: 'message', entry: { ...entry, id: 9, approval: { ...entry.approval, id: 'a9', title: 'Edit package.json', sensitive: 'package.json can run code or change how your tools behave', detail: 'x'.repeat(4000), detailCut: 9000 } } });
+  assert.match(h.ids.log.textContent, /Look closely: package.json can run code/);
+  assert.match(h.ids.log.textContent, /Showing the first 4,000 of 9,000 characters/);
+  h.click(h.ids.log, 'Show the full change'); assert.deepEqual(h.sent.at(-1), { type: 'approvalFull', id: 'a9' });
+  const row9 = walk(h.ids.log).find((e) => e.dataset && e.dataset.approval === 'a9');
+  assert.ok(!walk(row9).some((e) => e.tagName === 'button' && e.textContent === 'Allow edits for this task'), 'no task-wide choice on a sensitive card');
+});
+
+test('what an agent can do: set from its menu; only one agent can edit', () => {
+  const { setup } = require('./fixtures/webview-dom');
+  const h = setup();
+  h.controls.codex.access = 'edit'; h.controls['codex-2'].editorElsewhere = true;
+  h.receive({ type: 'meta', meta: h.meta, controls: h.controls });
+  assert.match(h.ids.participants.textContent, /can edit/);
+  h.click(h.ids.participants, 'Checker controls');
+  assert.match(h.ids.pop.textContent, /Only one agent in a room can edit files/);
+  h.click(h.ids.participants, 'Research controls');
+  h.controls['codex-2'].editorElsewhere = false;
+  h.click(h.ids.participants, 'Builder controls'); h.click(h.ids.pop, 'Read only');
+  assert.deepEqual(h.sent.at(-1), { type: 'command', text: '/codex access read' });
+});
+
+test('a room in a separate copy says so, counts changes, and offers open / bring in / remove', () => {
+  const { setup } = require('./fixtures/webview-dom');
+  const h = setup();
+  const meta = { ...h.meta, copy: { repo: '/r', dir: '/s/copy', branch: 'wagon-wheel/x-1', base: 'abc' } };
+  h.receive({ type: 'init', meta, controls: h.controls, transcript: [] });
+  assert.deepEqual(h.sent.at(-1), { type: 'copy', action: 'refresh' });
+  h.receive({ type: 'copyChanges', changes: { files: ['a', 'b'], commits: 1 } });
+  assert.match(h.ids.ids.textContent, /Working in a separate copy · branch wagon-wheel\/x-1 · 2 changed files, 1 commit/);
+  h.click(h.ids.ids, 'Bring changes into your folder'); assert.deepEqual(h.sent.at(-1), { type: 'copy', action: 'bringIn' });
+});

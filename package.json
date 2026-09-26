@@ -3,7 +3,7 @@
   "displayName": "Wagon Wheel",
   "icon": "media/icon.png",
   "description": "One VS Code room for your local Claude Code and Codex sessions. Named participants run as private child processes over stdio: no daemon, no open ports.",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "publisher": "darkrangerstudios",
   "private": true,
   "license": "SEE LICENSE IN LICENSE",

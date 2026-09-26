@@ -4,7 +4,9 @@ const path = require('path');
 
 const PROVIDERS = new Set(['claude', 'codex']);
 const RESERVED = new Set(['both', 'all', 'human', 'system', ...Object.getOwnPropertyNames(Object.prototype)]);
-const FIELDS = new Set(['id', 'label', 'provider', 'cwd', 'sessionId', 'model', 'effort', 'fast', 'typed', 'typedThreads', 'forkFrom']);
+const FIELDS = new Set(['id', 'label', 'provider', 'cwd', 'sessionId', 'model', 'effort', 'fast', 'typed', 'typedThreads', 'forkFrom', 'access', 'briefAccess']);
+// What an agent may do. Read only unless the person chose more for it; at most one agent per room above read only.
+const LEVELS = ['read', 'edit', 'run'];
 const CONTROL = /[\x00-\x1f\x7f-\x9f]/;
 const own = (value, key) => Object.hasOwn(value, key);
 const plain = (value) => value !== null && typeof value === 'object'
@@ -64,7 +66,7 @@ function normalizeParticipants(meta = {}, settings = {}) {
   }
   if (!Array.isArray(seats) || seats.length < 1 || seats.length > 6) invalid('roster; choose between one and six participants');
   const seen = new Set();
-  return Array.from(seats).map((seat) => {
+  const out = Array.from(seats).map((seat) => {
     if (!plain(seat) || Object.keys(seat).some((key) => !FIELDS.has(key))) invalid('record');
     const { id, label } = seat;
     if (typeof id !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(id) || RESERVED.has(id) || /^h[0-9]+$/.test(id)) invalid('id');
@@ -84,8 +86,14 @@ function normalizeParticipants(meta = {}, settings = {}) {
       record.typedThreads = [...new Set(seat.typedThreads)];
     }
     if (own(seat, 'forkFrom')) record.forkFrom = sessionId(seat.forkFrom);
+    const access = seat.access === undefined || seat.access === null ? 'read' : seat.access;
+    if (!LEVELS.includes(access)) invalid('permission level');
+    record.access = access;
+    if (seat.briefAccess !== undefined) { if (!LEVELS.includes(seat.briefAccess)) invalid('permission level'); record.briefAccess = seat.briefAccess; }
     return record;
   });
+  if (out.filter((s) => s.access !== 'read').length > 1) throw new Error('Only one agent in a room can edit files. Set the others to read only.');
+  return out;
 }
 
 // Only coordinates clients in this extension-host process. It cannot detect external CLI writers or other windows.
@@ -124,4 +132,4 @@ class SessionClaims {
   }
 }
 
-module.exports = { normalizeParticipants, SessionClaims };
+module.exports = { normalizeParticipants, SessionClaims, LEVELS };

@@ -82,10 +82,14 @@ test('Codex: new threads carry the tools; a tool call reaches the running turn o
   assert.strictEqual(writes.find((w) => w.id === 8).result.success, false);
 });
 
-test('Codex: other server requests are still declined', () => {
+test('Codex: at read only an approval request is declined, and other server requests are refused', async () => {
   const { c, writes } = codex();
   c._onLine(JSON.stringify({ id: 9, method: 'item/commandExecution/requestApproval', params: {} }));
-  assert.ok(writes.find((w) => w.id === 9).error);
+  c._onLine(JSON.stringify({ id: 10, method: 'item/fileChange/requestApproval', params: {} }));
+  c._onLine(JSON.stringify({ id: 11, method: 'item/tool/requestUserInput', params: {} }));
+  await tick();
+  assert.deepStrictEqual([writes.find((w) => w.id === 9).result, writes.find((w) => w.id === 10).result], [{ decision: 'decline' }, { decision: 'decline' }]);
+  assert.ok(writes.find((w) => w.id === 11).error);
 });
 
 test('a tool result that resolves after the reply ended is not handed to the model (both clients)', async () => {
