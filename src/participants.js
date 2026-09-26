@@ -4,7 +4,8 @@ const path = require('path');
 
 const PROVIDERS = new Set(['claude', 'codex']);
 const RESERVED = new Set(['both', 'all', 'human', 'system', ...Object.getOwnPropertyNames(Object.prototype)]);
-const FIELDS = new Set(['id', 'label', 'provider', 'cwd', 'sessionId', 'model', 'effort', 'fast', 'typed', 'typedThreads', 'forkFrom', 'access', 'briefAccess']);
+const FIELDS = new Set(['id', 'label', 'provider', 'cwd', 'sessionId', 'model', 'effort', 'fast', 'typed', 'typedThreads', 'forkFrom', 'access', 'briefAccess', 'mode']);
+const MODES = ['ask', 'auto', 'bypass'];
 // What an agent may do. Read only unless the person chose more for it; at most one agent per room above read only.
 const LEVELS = ['read', 'edit', 'run'];
 const CONTROL = /[\x00-\x1f\x7f-\x9f]/;
@@ -89,6 +90,11 @@ function normalizeParticipants(meta = {}, settings = {}) {
     const access = seat.access === undefined || seat.access === null ? 'read' : seat.access;
     if (!LEVELS.includes(access)) invalid('permission level');
     record.access = access;
+    // How its requests are answered. Auto needs an agent that edits; bypass one that also runs commands. Bypass never
+    // survives a reopen (bootSeats resets it): it is turned on per session, with a warning each time.
+    const mode = seat.mode === undefined || seat.mode === null ? 'ask' : seat.mode;
+    if (!MODES.includes(mode)) invalid('mode');
+    record.mode = access === 'read' || (mode === 'bypass' && access !== 'run') ? 'ask' : mode;
     if (seat.briefAccess !== undefined) { if (!LEVELS.includes(seat.briefAccess)) invalid('permission level'); record.briefAccess = seat.briefAccess; }
     return record;
   });
@@ -132,4 +138,4 @@ class SessionClaims {
   }
 }
 
-module.exports = { normalizeParticipants, SessionClaims, LEVELS };
+module.exports = { normalizeParticipants, SessionClaims, LEVELS, MODES };

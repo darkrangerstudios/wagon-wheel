@@ -233,3 +233,22 @@ test('a Codex request to write to a whole folder never falls under "Allow edits 
   r.answerApproval(r.state.transcript.at(-1).approval.id, 'allowTask');
   assert.strictEqual(r.state.transcript.at(-1).approval.status, 'allowed', 'and never becomes the rule');
 });
+
+test('modes answer for the human after the host\'s refusals: auto takes ordinary edits, bypass takes edits and commands', async () => {
+  const modes = { claude: 'auto', codex: 'bypass' };
+  const r = room({ modeFor: (n) => modes[n] }); r.postFromHuman('@claude @codex go');
+  assert.deepStrictEqual(await r.requestApproval('claude', edit()), { allow: true });
+  assert.strictEqual(r.state.transcript.at(-1).approval.auto, 'auto');
+  r.requestApproval('claude', { kind: 'command', title: 'Run: ls', command: 'ls' });
+  assert.strictEqual(r.state.transcript.at(-1).approval.status, 'pending', 'auto: commands still ask');
+  r.requestApproval('claude', { ...edit('Edit package.json'), sensitive: 'x' });
+  assert.strictEqual(r.state.transcript.at(-1).approval.status, 'pending', 'auto: files that can run code still ask');
+  r.requestApproval('claude', { ...edit(), noRule: true });
+  assert.strictEqual(r.state.transcript.at(-1).approval.status, 'pending', 'auto: a folder-wide write still asks');
+  assert.deepStrictEqual(await r.requestApproval('codex', { kind: 'command', title: 'Run: rm x', command: 'rm x' }), { allow: true });
+  assert.strictEqual(r.state.transcript.at(-1).approval.auto, 'bypass');
+  assert.strictEqual((await r.requestApproval('codex', { ...edit('Edit package.json'), sensitive: 'x' })).allow, true);
+  for (const why of ['outside its folder', 'inside git\'s own folder, where an edit can run commands', 'Wagon Wheel couldn\'t see which files it would change']) {
+    assert.deepStrictEqual(await r.requestApproval('codex', { ...edit(), refused: why }), { allow: false, why }, `bypass never overrides: ${why}`);
+  }
+});

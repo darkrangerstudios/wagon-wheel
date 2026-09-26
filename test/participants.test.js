@@ -25,9 +25,9 @@ test('legacy settings migrate without mutating saved room metadata', () => {
   const participants = normalizeParticipants(meta, settings);
   assert.deepEqual(participants, [
     { id: 'claude', label: 'Claude', provider: 'claude', cwd, sessionId: 'c1', model: null,
-      effort: 'high', fast: true, typed: true, forkFrom: 'c0', access: 'read' },
+      effort: 'high', fast: true, typed: true, forkFrom: 'c0', access: 'read', mode: 'ask' },
     { id: 'codex', label: 'Codex', provider: 'codex', cwd, sessionId: 'x1', model: 'saved-model',
-      effort: 'low', fast: false, typed: true, typedThreads: ['x1'], forkFrom: 'x0', access: 'read' }
+      effort: 'low', fast: false, typed: true, typedThreads: ['x1'], forkFrom: 'x0', access: 'read', mode: 'ask' }
   ]);
   participants[1].typedThreads.push('x2');
   assert.deepEqual(meta, before);
@@ -147,4 +147,11 @@ test('permission levels: read only by default, validated, and at most one agent 
   assert.deepEqual(normalizeParticipants({ seats: [seat('a', 'claude'), seat('b', 'codex', 'run')] }).map((p) => p.access), ['read', 'run']);
   assert.throws(() => normalizeParticipants({ seats: [seat('a', 'claude', 'admin')] }), /permission level/);
   assert.throws(() => normalizeParticipants({ seats: [seat('a', 'claude', 'edit'), seat('b', 'codex', 'edit')] }), /Only one agent in a room can edit/);
+});
+
+test('modes: ask by default; auto needs an agent that edits, bypass one that runs commands', () => {
+  const seat = (id, access, mode) => ({ id, label: id, provider: 'claude', cwd, access, mode });
+  const m = (access, mode) => normalizeParticipants({ seats: [seat('a', access, mode)] })[0].mode;
+  assert.deepStrictEqual([m('read', 'auto'), m('edit', 'auto'), m('edit', 'bypass'), m('run', 'bypass'), m('run', undefined)], ['ask', 'auto', 'ask', 'bypass', 'ask']);
+  assert.throws(() => m('run', 'yolo'), /mode/);
 });
